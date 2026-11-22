@@ -1,0 +1,11 @@
+- Ứng dụng Windows quản lý nhiều tài khoản Zalo PC trong một giao diện.
+- Nhận diện Zalo gốc, tạo clone với thư mục dữ liệu riêng.
+- Mở, dừng, đổi tên, đổi avatar và tạo shortcut cho từng hồ sơ.
+- Hiển thị dung lượng data và app của từng hồ sơ.
+- Kiểm tra và cập nhật clone từ bản Zalo gốc theo thao tác người dùng.
+- Xuất/nhập dữ liệu, kiểm tra ID tài khoản và giữ bản dữ liệu cũ trước khi nhập.
+- Hỗ trợ nhập bản sao lưu thành hồ sơ riêng; chưa bảo đảm khôi phục toàn bộ lịch sử hoặc phiên đăng nhập.
+- Yêu cầu Windows 64-bit, .NET Framework 4.x có bộ biên dịch C# và Zalo PC đã cài đặt.
+- Build bằng PowerShell: `.\build.ps1`.
+- Chạy ứng dụng: `.\ZaloManager.exe`.
+- Mã nguồn tại `src/`, giao diện và biểu tượng tại `src/` và `assets/`, kiểm thử tại `tests/`.

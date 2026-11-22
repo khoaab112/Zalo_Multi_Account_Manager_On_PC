@@ -1,0 +1,15 @@
+*.exe
+*.dll
+*.pdb
+*.log
+*.tmp
+*.zmdata
+phase1-lab/
+bin/
+obj/
+.vs/
+Transfers/
+Instances/
+Releases/
+profiles.json*
+original-path.txt
