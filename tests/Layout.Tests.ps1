@@ -1,4 +1,4 @@
-param([string]$Executable = (Join-Path $PSScriptRoot '..\ZaloManager.Poc.Accounts.exe'))
+param([string]$Executable = (Join-Path $PSScriptRoot '..\ZaloManager.exe'))
 $ErrorActionPreference='Stop'
 Add-Type -AssemblyName PresentationFramework
 [Reflection.Assembly]::LoadFrom($Executable) | Out-Null
@@ -23,7 +23,23 @@ try {
     if(@($grid.Columns | Where-Object Header -eq 'Thư mục dữ liệu').Count -ne 0){throw 'Data path column remains'}
     $action.CellTemplate.Seal()
     $content=$action.CellTemplate.LoadContent()
-    if($content.Children.Count -ne 6){throw 'Row action buttons missing'}
+    $controls=$content.Children
+    if($controls.Count -ne 5 -or $controls[0].Tag -ne 'Mở Zalo' -or $controls[1].Content -ne 'Data' -or $controls[3].Tag -ne '…' -or $controls[4].Tag -ne 'Xóa'){throw 'Profile actions out of order'}
+    $recallAction=$controls[2]
+    if($recallAction.Children[0].Content -ne 'Thu hồi'){throw 'Recall button missing'}
+    if($recallAction.Children[1] -isnot [Windows.Controls.Border]){throw 'Recall count badge missing beside the button'}
+    $runningTrigger=$action.CellTemplate.Triggers[0]
+    if($runningTrigger.Value -ne 'Đang chạy' -or @($runningTrigger.Setters | Where-Object { $_.Property -eq [Windows.Controls.Button]::ContentProperty -and $_.Value -like '*Dừng' }).Count -ne 1){throw 'Running state does not switch to Stop'}
+    $menuMethod=$type.GetMethod('CreateProfileMenu',$flags)
+    $menuArgs=New-Object 'System.Object[]' 1
+    $menuArgs[0]=$row.PSObject.BaseObject
+    $originalMenu=$menuMethod.Invoke($window,$menuArgs)
+    if($originalMenu.Items.Count -ne 1 -or $originalMenu.Items[0].Header -ne 'Tạo shortcut'){throw 'Original menu must offer Shortcut only'}
+    $clone=New-Object ZaloManagerPoc.Profile
+    $clone.Id='998873'
+    $menuArgs[0]=$clone.PSObject.BaseObject
+    $cloneMenu=$menuMethod.Invoke($window,$menuArgs)
+    if($cloneMenu.Items[0].Header -ne 'Tạo shortcut' -or $cloneMenu.Items.Count -le 1){throw 'Clone menu lost shortcuts or existing options'}
     if($type.GetField('nextCheck',$flags)){throw 'Automatic update schedule remains'}
-    'PASS original first, fixed row order, legacy toolbar removed, six per-row actions, no automatic sync schedule'
+    'PASS original first, fixed row order, legacy toolbar removed, ordered actions, single power button and per-profile shortcut menus, no automatic sync schedule'
 } finally {$window.Close()}

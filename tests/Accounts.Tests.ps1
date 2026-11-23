@@ -1,4 +1,4 @@
-param([string]$Executable = (Join-Path $PSScriptRoot '..\ZaloManager.Poc.Accounts.exe'))
+param([string]$Executable = (Join-Path $PSScriptRoot '..\ZaloManager.exe'))
 $ErrorActionPreference = 'Stop'
 [Reflection.Assembly]::LoadFrom($Executable) | Out-Null
 Add-Type -AssemblyName System.IO.Compression.FileSystem

@@ -1,5 +1,6 @@
+param([string]$Executable = (Join-Path $PSScriptRoot '..\ZaloManager.exe'))
 $ErrorActionPreference='Stop'
-[Reflection.Assembly]::LoadFrom((Join-Path $PSScriptRoot '..\ZaloManager.Poc.Fixes.exe')) | Out-Null
+[Reflection.Assembly]::LoadFrom($Executable) | Out-Null
 $profile=New-Object ZaloManagerPoc.Profile
 $profile.Id='998855'; $profile.Name='Smoke test'; $profile.Source=[ZaloManagerPoc.Instance]::DetectSource()
 $profile.ActiveDirectory=Join-Path ([ZaloManagerPoc.Store]::Root) ('Smoke-'+[guid]::NewGuid().ToString('N'))

@@ -1,4 +1,4 @@
-param([string]$Executable = (Join-Path $PSScriptRoot '..\ZaloManager.Poc.exe'))
+param([string]$Executable = (Join-Path $PSScriptRoot '..\ZaloManager.exe'))
 $ErrorActionPreference = 'Stop'
 [Reflection.Assembly]::LoadFrom($Executable) | Out-Null
 $testRoot = Join-Path ([IO.Path]::GetTempPath()) ('ZaloManagerUpdateTest-' + [guid]::NewGuid().ToString('N'))

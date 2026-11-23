@@ -120,7 +120,9 @@ namespace ZaloManagerPoc
             {
                 grid.Clip = new RectangleGeometry(new Rect(0, 0, grid.ActualWidth, grid.ActualHeight), 11, 11);
                 bool compact = grid.ActualWidth < 1150;
-                double[] widths = compact ? new double[] { 56, 130, 120, 110, 108, 120 } : new double[] { 72, 170, 140, 120, 130, 170 };
+                double[] widths = grid.ActualWidth < 940
+                    ? new double[] { 48, 112, 106, 100, 104, 116 }
+                    : compact ? new double[] { 56, 130, 120, 110, 108, 120 } : new double[] { 72, 170, 140, 120, 130, 170 };
                 for (int index = 0; index < widths.Length; index++)
                     if (grid.Columns[index].Width.Value != widths[index]) grid.Columns[index].Width = new DataGridLength(widths[index]);
             };
@@ -157,7 +159,7 @@ namespace ZaloManagerPoc
             AddColumn("Phiên bản", "Version", 130);
             var versionStyle = new Style(typeof(TextBlock)); versionStyle.Setters.Add(new Setter(MarginProperty, new Thickness(12, 0, 0, 0))); versionStyle.Setters.Add(new Setter(VerticalAlignmentProperty, VerticalAlignment.Center)); versionStyle.Setters.Add(new Setter(TextBlock.FontFamilyProperty, new FontFamily("Consolas"))); versionStyle.Setters.Add(new Setter(TextBlock.FontSizeProperty, 12.0)); versionStyle.Setters.Add(new Setter(TextBlock.ForegroundProperty, ModernBrush("#334155"))); ((DataGridTextColumn)grid.Columns[4]).ElementStyle = versionStyle;
             AddBadgeColumn("Cập nhật", "UpdateStatus", "UpdateBackground", "UpdateForeground", 170, 6);
-            AddActionsColumn(); grid.Columns[6].Width = new DataGridLength(1, DataGridLengthUnitType.Star); grid.Columns[6].MinWidth = 350;
+            AddActionsColumn(); grid.Columns[6].Width = new DataGridLength(1, DataGridLengthUnitType.Star); grid.Columns[6].MinWidth = 302;
             foreach (var column in grid.Columns)
             {
                 var caption = new FrameworkElementFactory(typeof(TextBlock)); caption.SetBinding(TextBlock.TextProperty, new Binding { Converter = new TableHeaderConverter() });
@@ -167,7 +169,7 @@ namespace ZaloManagerPoc
         private void AddBadgeColumn(string header, string text, string background, string foreground, double width, double radius)
         {
             var border = new FrameworkElementFactory(typeof(Border)); border.SetBinding(Border.BackgroundProperty, new Binding(background)); border.SetValue(Border.CornerRadiusProperty, new CornerRadius(radius)); border.SetValue(Border.PaddingProperty, new Thickness(8, 4, 8, 4)); border.SetValue(MarginProperty, new Thickness(12, 0, 6, 0)); border.SetValue(HorizontalAlignmentProperty, HorizontalAlignment.Left); border.SetValue(VerticalAlignmentProperty, VerticalAlignment.Center);
-            var content = new FrameworkElementFactory(typeof(TextBlock)); content.SetBinding(TextBlock.TextProperty, new Binding(text)); content.SetBinding(TextBlock.ForegroundProperty, new Binding(foreground)); content.SetBinding(ToolTipProperty, new Binding(text)); content.SetValue(TextBlock.FontSizeProperty, 11.5); content.SetValue(TextBlock.FontWeightProperty, FontWeights.SemiBold); content.SetValue(TextBlock.TextTrimmingProperty, TextTrimming.CharacterEllipsis); content.SetValue(MaxWidthProperty, width - 40); border.AppendChild(content);
+            var content = new FrameworkElementFactory(typeof(TextBlock)); content.SetBinding(TextBlock.TextProperty, new Binding(text)); content.SetBinding(TextBlock.ForegroundProperty, new Binding(foreground)); content.SetBinding(ToolTipProperty, new Binding(text == "StatusText" ? "CdpStatus" : text)); content.SetValue(TextBlock.FontSizeProperty, 11.5); content.SetValue(TextBlock.FontWeightProperty, FontWeights.SemiBold); content.SetValue(TextBlock.TextTrimmingProperty, TextTrimming.CharacterEllipsis); content.SetValue(MaxWidthProperty, width - 40); border.AppendChild(content);
             grid.Columns.Add(new DataGridTemplateColumn { Header = header, Width = width, CellTemplate = new DataTemplate { VisualTree = border } });
         }
     }

@@ -142,31 +142,32 @@ namespace ZaloManagerPoc
         public static void ApplyAvatar(Profile profile)
         {
             var processes = Instance.Processes(profile);
-            try
-            {
-                if (processes.Count == 0) return;
-                System.Drawing.Icon icon = null;
-                string iconKey = profile.Id + "|" + profile.AvatarPath + "|shell-v2";
-                string key = iconKey + "|" + profile.Name;
-                if (!String.IsNullOrEmpty(profile.AvatarPath) && !Icons.TryGetValue(iconKey, out icon))
-                { icon = new System.Drawing.Icon(MakeIcon(profile)); Icons.Add(iconKey, icon); }
-                var windows = WindowActivation.Find(processes.Where(process => process.ProcessName == "Zalo").Select(process => process.Id));
-                foreach (var window in windows)
-                {
-                    string applied;
-                    if (AppliedIcons.TryGetValue(window, out applied) && applied == key) continue;
-                    ShellIdentity.Window(window, profile, MakeIcon(profile));
-                    IntPtr result;
-
-                    if (icon != null)
-                    {
-                        SendMessageTimeout(window, 0x80, IntPtr.Zero, icon.Handle, 2, 200, out result);
-                        SendMessageTimeout(window, 0x80, new IntPtr(1), icon.Handle, 2, 200, out result);
-                    }
-                    AppliedIcons[window] = key;
-                }
-            }
+            try { ApplyAvatar(profile, processes); }
             finally { foreach (var process in processes) process.Dispose(); }
+        }
+
+        internal static void ApplyAvatar(Profile profile, List<Process> processes)
+        {
+            if (processes.Count == 0) return;
+            System.Drawing.Icon icon = null;
+            string iconKey = profile.Id + "|" + profile.AvatarPath + "|shell-v2";
+            string key = iconKey + "|" + profile.Name;
+            if (!String.IsNullOrEmpty(profile.AvatarPath) && !Icons.TryGetValue(iconKey, out icon))
+            { icon = new System.Drawing.Icon(MakeIcon(profile)); Icons.Add(iconKey, icon); }
+            var windows = WindowActivation.Find(processes.Where(process => process.ProcessName == "Zalo").Select(process => process.Id));
+            foreach (var window in windows)
+            {
+                string applied;
+                if (AppliedIcons.TryGetValue(window, out applied) && applied == key) continue;
+                ShellIdentity.Window(window, profile, MakeIcon(profile));
+                IntPtr result;
+                if (icon != null)
+                {
+                    SendMessageTimeout(window, 0x80, IntPtr.Zero, icon.Handle, 2, 200, out result);
+                    SendMessageTimeout(window, 0x80, new IntPtr(1), icon.Handle, 2, 200, out result);
+                }
+                AppliedIcons[window] = key;
+            }
         }
 
         public static void Export(Profile profile, string destination)
@@ -288,31 +289,86 @@ namespace ZaloManagerPoc
     {
         private void AddActionsColumn()
         {
-            var panel = new FrameworkElementFactory(typeof(StackPanel));
-            panel.SetValue(StackPanel.OrientationProperty, Orientation.Horizontal);
-            string[] labels = { "Mở Zalo", "⏹ Dừng Zalo", "Mở thư mục Data", "Tạo Shortcut", "Xóa", "…" };
-            string[] display = { "▶ Mở", "■ Dừng", "Data", "↗ Shortcut", "\uE74D", "\uE712" };
-            for (int index = 0; index < labels.Length; index++)
-            {
-                string label = labels[index];
-                var button = new FrameworkElementFactory(typeof(Button));
-                button.SetValue(Button.ContentProperty, display[index]); button.SetValue(Button.TagProperty, label); button.SetValue(Button.ToolTipProperty, label == "…" ? "Đổi tên, avatar, import / xuất data" : label);
-                button.SetResourceReference(Button.StyleProperty, index == 0 ? "PrimaryButton" : index == 1 || index == 4 ? "DangerGhostButton" : "RowActionButton");
-                button.SetValue(Button.PaddingProperty, new Thickness(9, 6, 9, 6)); button.SetValue(Button.FontSizeProperty, 12.0);
-                button.SetValue(Button.MarginProperty, new Thickness(0, 0, 6, 0));
-                if (index >= 4) button.SetValue(Button.FontFamilyProperty, new System.Windows.Media.FontFamily("Segoe MDL2 Assets"));
-                button.SetValue(Button.VerticalAlignmentProperty, VerticalAlignment.Center);
-                if (label == "Xóa" || label == "…") button.SetBinding(Button.IsEnabledProperty, new Binding("IsOriginal") { Converter = new CloneEnabledConverter() });
-                button.AddHandler(Button.ClickEvent, new RoutedEventHandler(RowAction)); panel.AppendChild(button);
-            }
-            grid.Columns.Add(new DataGridTemplateColumn { Header = "Action", Width = 570, CellTemplate = new DataTemplate { VisualTree = panel } });
+            var panel = new FrameworkElementFactory(typeof(WrapPanel));
+            panel.SetValue(FrameworkElement.VerticalAlignmentProperty, VerticalAlignment.Center);
+            var power = RowButton("▶ Mở", "Mở Zalo", "PrimaryButton");
+            power.Name = "profilePower";
+            power.SetValue(Button.MinWidthProperty, 62.0);
+            panel.AppendChild(power);
+
+            panel.AppendChild(RowButton("Data", "Mở thư mục Data", "RowActionButton"));
+
+            var recallButton = RowButton("Thu hồi", "Xem tin đã thu hồi của hồ sơ này", "RowActionButton", ShowRecalledMessages);
+            recallButton.SetValue(Button.MarginProperty, new Thickness(0));
+
+            var badge = new FrameworkElementFactory(typeof(Border));
+            badge.SetValue(Border.BackgroundProperty, ModernBrush("#DC2626"));
+            badge.SetValue(Border.CornerRadiusProperty, new CornerRadius(9));
+            badge.SetValue(Border.MinWidthProperty, 18.0);
+            badge.SetValue(Border.PaddingProperty, new Thickness(4, 1, 4, 1));
+            badge.SetValue(Border.MarginProperty, new Thickness(0, -7, -7, 0));
+            badge.SetValue(Border.HorizontalAlignmentProperty, HorizontalAlignment.Right);
+            badge.SetValue(Border.VerticalAlignmentProperty, VerticalAlignment.Top);
+            badge.SetValue(Border.BorderBrushProperty, System.Windows.Media.Brushes.White);
+            badge.SetValue(Border.BorderThicknessProperty, new Thickness(1));
+            badge.SetValue(Border.IsHitTestVisibleProperty, false);
+            badge.SetBinding(Border.VisibilityProperty, new Binding("RecalledBadgeVisibility"));
+
+            var count = new FrameworkElementFactory(typeof(TextBlock));
+            count.SetValue(TextBlock.ForegroundProperty, System.Windows.Media.Brushes.White);
+            count.SetValue(TextBlock.FontWeightProperty, FontWeights.SemiBold);
+            count.SetValue(TextBlock.FontSizeProperty, 11.0);
+            count.SetValue(TextBlock.TextAlignmentProperty, TextAlignment.Center);
+            count.SetBinding(TextBlock.TextProperty, new Binding("RecalledCount"));
+            badge.AppendChild(count);
+            var recallAction = new FrameworkElementFactory(typeof(Grid));
+            recallAction.SetValue(FrameworkElement.VerticalAlignmentProperty, VerticalAlignment.Center);
+            recallAction.AppendChild(recallButton);
+            recallAction.AppendChild(badge);
+            recallAction.SetValue(FrameworkElement.MarginProperty, new Thickness(0, 0, 12, 0));
+            panel.AppendChild(recallAction);
+
+            var more = RowButton("\uE712", "…", "RowActionButton");
+            more.SetValue(Button.ToolTipProperty, "Thao tác khác · Tạo shortcut");
+            more.SetValue(Button.FontFamilyProperty, new System.Windows.Media.FontFamily("Segoe MDL2 Assets"));
+            panel.AppendChild(more);
+
+            var remove = RowButton("\uE74D", "Xóa", "DangerGhostButton");
+            remove.SetValue(Button.FontFamilyProperty, new System.Windows.Media.FontFamily("Segoe MDL2 Assets"));
+            remove.SetBinding(Button.IsEnabledProperty, new Binding("IsOriginal") { Converter = new CloneEnabledConverter() });
+            panel.AppendChild(remove);
+
+            var template = new DataTemplate { VisualTree = panel };
+            var running = new DataTrigger { Binding = new Binding("Status"), Value = "Đang chạy" };
+            running.Setters.Add(new Setter(Button.ContentProperty, "■ Dừng", power.Name));
+            running.Setters.Add(new Setter(Button.TagProperty, "⏹ Dừng Zalo", power.Name));
+            running.Setters.Add(new Setter(Button.ToolTipProperty, "Dừng Zalo", power.Name));
+            running.Setters.Add(new Setter(Button.StyleProperty, new System.Windows.DynamicResourceExtension("DangerGhostButton"), power.Name));
+            template.Triggers.Add(running);
+            grid.Columns.Add(new DataGridTemplateColumn { Header = "Action", Width = 570, CellTemplate = template });
         }
+
+        private FrameworkElementFactory RowButton(string content, string action, string style, RoutedEventHandler handler = null)
+        {
+            var button = new FrameworkElementFactory(typeof(Button));
+            button.SetValue(Button.ContentProperty, content);
+            button.SetValue(Button.TagProperty, action);
+            button.SetValue(Button.ToolTipProperty, action);
+            button.SetResourceReference(Button.StyleProperty, style);
+            button.SetValue(Button.PaddingProperty, new Thickness(9, 6, 9, 6));
+            button.SetValue(Button.FontSizeProperty, 12.0);
+            button.SetValue(Button.MarginProperty, new Thickness(0, 0, 6, 0));
+            button.SetValue(Button.VerticalAlignmentProperty, VerticalAlignment.Center);
+            button.AddHandler(Button.ClickEvent, handler ?? new RoutedEventHandler(RowAction));
+            return button;
+        }
+
         private async void RowAction(object sender, RoutedEventArgs args)
         {
-            var button = (Button)sender; var profile = button.DataContext as Profile;
+            var control = (FrameworkElement)sender; var profile = control.DataContext as Profile;
             if (profile == null || busy) return;
-            string action = (string)button.Tag;
-            if (action == "…") { ShowProfileMenu(button, profile); return; }
+            string action = (string)control.Tag;
+            if (action == "…") { ShowProfileMenu((Button)control, profile); return; }
             SetBusy(true);
             try
             {
@@ -353,9 +409,22 @@ namespace ZaloManagerPoc
 
         private void ShowProfileMenu(Button button, Profile profile)
         {
+            var menu = CreateProfileMenu(profile);
+            button.ContextMenu = menu; menu.PlacementTarget = button;
+            menu.Placement = System.Windows.Controls.Primitives.PlacementMode.Bottom;
+            menu.HorizontalOffset = -12; menu.VerticalOffset = -6; menu.DataContext = profile; menu.IsOpen = true;
+        }
+
+        private ContextMenu CreateProfileMenu(Profile profile)
+        {
             var menu = new ContextMenu();
             menu.Style = (Style)Resources["ModernContextMenu"];
             menu.Resources.MergedDictionaries.Add(Resources);
+            var shortcut = new MenuItem { Header = "Tạo shortcut", Tag = "Tạo Shortcut", DataContext = profile, Icon = MenuGlyph("\uE71B") };
+            shortcut.Click += RowAction;
+            menu.Items.Add(shortcut);
+            if (profile.IsOriginal) return menu;
+            menu.Items.Add(new Separator { Style = (Style)Resources["ModernMenuSeparator"] });
             menu.Items.Add(new MenuItem { Header = "TÙY CHỈNH HỒ SƠ", Style = (Style)Resources["ModernMenuGroupLabel"] });
             var rename = new MenuItem { Header = "Cập nhật tên hồ sơ…" };
             var manualName = new MenuItem { Header = "Tự đổi…" };
@@ -393,9 +462,7 @@ namespace ZaloManagerPoc
             rename.Icon = MenuGlyph("\uE70F"); avatar.Icon = MenuGlyph("\uEB9F"); export.Icon = MenuGlyph("\uE898"); import.Icon = MenuGlyph("\uE8B5");
             menu.Items.Insert(menu.Items.IndexOf(export), new Separator { Style = (Style)Resources["ModernMenuSeparator"] });
             menu.Items.Insert(menu.Items.IndexOf(export), new MenuItem { Header = "DỮ LIỆU HỒ SƠ", Style = (Style)Resources["ModernMenuGroupLabel"] });
-            button.ContextMenu = menu; menu.PlacementTarget = button;
-            menu.Placement = System.Windows.Controls.Primitives.PlacementMode.Bottom;
-            menu.HorizontalOffset = -12; menu.VerticalOffset = -6; menu.DataContext = profile; menu.IsOpen = true;
+            return menu;
         }
         private static TextBlock MenuGlyph(string glyph)
         { return new TextBlock { Text = glyph, FontFamily = new System.Windows.Media.FontFamily("Segoe MDL2 Assets"), FontSize = 15, VerticalAlignment = VerticalAlignment.Center }; }

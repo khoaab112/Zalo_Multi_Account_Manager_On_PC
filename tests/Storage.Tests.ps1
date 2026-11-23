@@ -1,4 +1,4 @@
-param([string]$Executable='D:\coding\Zalo\ZaloManager.Storage.exe')
+param([string]$Executable=(Join-Path $PSScriptRoot '..\ZaloManager.exe'))
 $ErrorActionPreference='Stop'
 [Reflection.Assembly]::LoadFrom($Executable)|Out-Null
 $profile=New-Object ZaloManagerPoc.Profile

@@ -6,6 +6,14 @@ namespace ZaloManagerPoc
 {
     public static class ShellIdentity
     {
+        [DllImport("shell32.dll", CharSet = CharSet.Unicode)]
+        private static extern int SetCurrentProcessExplicitAppUserModelID(string appId);
+
+        internal static void SetManagerIdentity()
+        {
+            SetCurrentProcessExplicitAppUserModelID("zmgr.manager");
+        }
+
         [ComImport, Guid("00021401-0000-0000-C000-000000000046")] private class ShellLink { }
         [ComImport, Guid("000214F9-0000-0000-C000-000000000046"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
         private interface IShellLinkW
@@ -34,12 +42,19 @@ namespace ZaloManagerPoc
             var link = (IShellLinkW)new ShellLink();
             try
             {
-                link.SetPath(profile.Executable); link.SetWorkingDirectory(System.IO.Path.GetDirectoryName(profile.Executable));
+                string launcher = typeof(Program).Assembly.Location;
+                link.SetPath(launcher);
+                link.SetArguments(ProfileLaunchArguments(profile));
+                link.SetWorkingDirectory(System.IO.Path.GetDirectoryName(launcher));
                 link.SetDescription(profile.Name); link.SetIconLocation(icon, 0);
                 ((System.Runtime.InteropServices.ComTypes.IPersistFile)link).Save(path, true);
             }
             finally { Marshal.ReleaseComObject(link); }
             Shortcut(path, profile);
+        }
+        private static string ProfileLaunchArguments(Profile profile)
+        {
+            return "--open-profile " + profile.Id;
         }
         [StructLayout(LayoutKind.Sequential)]
         private struct PropertyKey { public Guid Format; public uint Id; }
@@ -95,7 +110,7 @@ namespace ZaloManagerPoc
             SHGetPropertyStoreForWindow(window, ref iid, out store);
             try
             {
-                Write(store, 2, "\"" + profile.Executable + "\"");
+                Write(store, 2, "\"" + typeof(Program).Assembly.Location + "\" " + ProfileLaunchArguments(profile));
                 Write(store, 3, iconPath + ",0"); Write(store, 4, profile.Name); Write(store, 5, AppId(profile)); store.Commit();
             }
             finally { Marshal.ReleaseComObject(store); }

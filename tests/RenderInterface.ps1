@@ -1,4 +1,4 @@
-param([string]$Executable = (Join-Path $PSScriptRoot '..\ZaloManager.Design.exe'))
+param([string]$Executable = (Join-Path $PSScriptRoot '..\ZaloManager.exe'))
 $ErrorActionPreference='Stop'
 Add-Type -AssemblyName PresentationFramework
 [Reflection.Assembly]::LoadFrom($Executable) | Out-Null
