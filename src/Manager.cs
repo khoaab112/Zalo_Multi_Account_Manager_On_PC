@@ -36,8 +36,9 @@ namespace ZaloManagerPoc
         public bool IsOriginal { get { return Id == "original"; } }
         public string Status { get; set; }
         public string UpdateStatus { get; set; }
-        public string StorageUsage { get; set; }
-        public string StorageDetails { get; set; }
+        internal StorageMeasurement MeasuredStorage { get; set; }
+        public string StorageUsage { get { return MeasuredStorage == null ? null : MeasuredStorage.Text; } }
+        public string StorageDetails { get { return MeasuredStorage == null ? null : MeasuredStorage.Details; } }
         public string CdpStatus { get { return CdpMessageWatcher.GetStatus(this); } }
         public int RecalledCount { get { return CdpMessageWatcher.GetRecalledCount(Id); } }
         public Visibility RecalledBadgeVisibility { get { return RecalledCount > 0 ? Visibility.Visible : Visibility.Collapsed; } }
@@ -395,22 +396,27 @@ namespace ZaloManagerPoc
 
         public static void Open(Profile profile)
         {
+            OpenAndCheckWindow(profile);
+        }
+
+        internal static bool OpenAndCheckWindow(Profile profile)
+        {
             using (var launch = new Mutex(false, "Local\\ZaloManagerProfileLaunch-" + profile.Id))
             {
                 try { launch.WaitOne(); }
                 catch (AbandonedMutexException) { }
-                try { OpenProfile(profile); }
+                try { return OpenProfile(profile); }
                 finally { launch.ReleaseMutex(); }
             }
         }
 
-        private static void OpenProfile(Profile profile)
+        private static bool OpenProfile(Profile profile)
         {
             bool running = IsRunning(profile);
             if (running && WindowActivation.Restore(profile))
             {
                 CdpMessageWatcher.Start(profile, 0);
-                return;
+                return true;
             }
             if (!profile.IsOriginal && (String.IsNullOrEmpty(profile.PatchedHash) || Hash(Path.Combine(profile.DirectoryPath, "resources", "app.asar")) != profile.PatchedHash))
                 throw new InvalidDataException("Gói ứng dụng đã thay đổi hoặc chuẩn bị chưa hoàn tất. Cần kiểm tra tương thích trước khi mở.");
@@ -422,7 +428,8 @@ namespace ZaloManagerPoc
                 Arguments = "--remote-debugging-address=127.0.0.1 --remote-debugging-port=" + port })) { }
             CdpMessageWatcher.Start(profile, running ? 0 : port);
             for (int attempt = 0; attempt < 20; attempt++)
-            { System.Threading.Thread.Sleep(200); if (WindowActivation.Restore(profile)) return; }
+            { System.Threading.Thread.Sleep(200); if (WindowActivation.Restore(profile)) return true; }
+            return false;
         }
 
         public static void Close(Profile profile)
@@ -675,7 +682,13 @@ namespace ZaloManagerPoc
         }
         private async void AddProfile(object sender, RoutedEventArgs args)
         {
-            if (String.IsNullOrWhiteSpace(name.Text)) { status.Text = "Nhập tên hồ sơ."; return; }
+            if (String.IsNullOrWhiteSpace(name.Text))
+            {
+                profileNameError.Visibility = Visibility.Visible;
+                System.Windows.Automation.AutomationProperties.SetHelpText(name, ProfileNameRequired);
+                name.Focus();
+                return;
+            }
             SetBusy(true); timer.Stop();
             try
             {
@@ -689,6 +702,8 @@ namespace ZaloManagerPoc
                 await Task.Run(() => Instance.Prepare(profile));
                 Store.Save(profiles); grid.SelectedItem = profile;
                 status.Text = "Đã chuẩn bị hồ sơ. Bấm Mở Zalo ở hàng hồ sơ để đăng nhập.";
+                RefreshStatus();
+                NoticeDialog.Success(this, "Tạo hồ sơ thành công", "Hồ sơ đã sẵn sàng. Mở Zalo để đăng nhập.", profile.Name);
             }
             catch (Exception exception) { Report(exception); }
             finally { SetBusy(false); RefreshStatus(); timer.Start(); }

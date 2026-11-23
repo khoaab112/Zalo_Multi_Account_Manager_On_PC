@@ -100,6 +100,29 @@ const nestedResult = readRendered(nestedRoot, true);
 assert.equal(nestedResult.source, fileCdn, 'Recognize the CDN on a deeply nested file card');
 assert.equal(nestedResult.fileSize, '55');
 assert.equal(nestedResult.checksum, fileChecksum);
+const inlineVideo = frame({ id: 'inline-video', kind: 'video', selector: '.videoContainer' });
+inlineVideo.node[reactKey] = {};
+inlineVideo.part[reactKey] = { memoizedProps: { data: { message: { oriUrl: 'https://video.zdn.vn/fixture/mobile.mp4' } } },
+    return: inlineVideo.node[reactKey] };
+assert.equal(readRendered(inlineVideo.node, true).source, 'https://video.zdn.vn/fixture/mobile.mp4');
+const phoneVideo = frame({ id: 'phone-video', kind: 'video', selector: '.video-msg-container' });
+phoneVideo.node[reactKey] = {};
+phoneVideo.part[reactKey] = { memoizedProps: { message: { message: { oriUrl: 'https://video.zdn.vn/fixture/phone.mp4' } } },
+    return: phoneVideo.node[reactKey] };
+assert.equal(readRendered(phoneVideo.node, true).source, 'https://video.zdn.vn/fixture/phone.mp4',
+    'Recognize the video thumbnail card before Zalo creates a video element');
+const phoneVideoUrl = 'https://video-stal-41.dlmd.me/fixture/phone.mp4';
+for (const selector of ['.video-message__non-caption-wrapper', '.video-message__video-player']) {
+    const card = frame({ id: 'mobile-video', kind: 'video', selector });
+    card.node.id = 'bb_msg_id_mobile-video';
+    card.node[reactKey] = {};
+    card.part[reactKey] = { memoizedProps: { data: { message: { oriUrl: phoneVideoUrl } } },
+        return: card.node[reactKey] };
+    assert.equal(readRendered(card.node, true).kind, 'video');
+    assert.equal(readRendered(card.node, true).source, phoneVideoUrl);
+    card.part[reactKey].memoizedProps.data.message.oriUrl = phoneVideoUrl.replace('.dlmd.me/', '.dlmd.me.example.com/');
+    assert.equal(readRendered(card.node, true).source, '');
+}
 console.log('PASS file card without DOM href and message scope');
 
 const voice = frame({ id: 'voice-params', kind: 'audio', selector: '.voice-message' });
@@ -222,9 +245,20 @@ try {
             'Archive a late preview when the CDN URL stays the same');
         assert.ok(!runInNewContext(fallbackQuery, fallbackContext).some(row => row.previewOnly), 'Send the preview only once');
     } finally { clearTimeout(fallbackContext.window.__zaloManagerVisibleMessages.expiry); }
+
+    const stale = frame({ id: 'old-recall', kind: 'video', selector: '.videoContainer' });
+    stale.node.recalled = true;
+    const staleContext = { ...context, window: {}, document: { documentElement: {}, querySelector:
+        selector => selector === '#messageViewScroll' ? { ...pane, querySelectorAll: () => [stale.node] } : null } };
+    try {
+        const oldRows = runInNewContext(expression('CdpVisibleMessages.cs', 'Query') + '("old",' + expression('CdpRecallMedia.cs', 'ReadRenderedMessage') + ')', staleContext);
+        assert.ok(oldRows.some(row => row.recalled && !row.observedTransition), 'Opening a conversation must not report its old recall as new');
+    } finally { clearTimeout(staleContext.window.__zaloManagerVisibleMessages.expiry); }
     const expected = cases.filter(sample => !sample.outgoing).map(sample => ({
         id: sample.id, kind: sample.kind, sha256: hashes.get(sample.id) ?? null,
     }));
+    assert.ok(batches.some(row => row.id === 'broken-card' && row.observedTransition), 'Keep the recall signal when the card could not be read');
+    expected.push({ id: 'broken-card', kind: null, sha256: null });
     writeFileSync(process.argv[2], JSON.stringify({ rows: batches, expected }));
     console.log('PASS DOM: 5 attachment types, exact bytes, recall, missing source and sender exclusion');
 } finally {

@@ -5,6 +5,7 @@ using System.Linq;
 using System.Runtime.Serialization;
 using System.Runtime.Serialization.Json;
 using System.Security.Cryptography;
+using System.Text;
 
 namespace ZaloManagerPoc
 {
@@ -79,6 +80,35 @@ namespace ZaloManagerPoc
                     ? threads.Values.Sum(thread => thread.Messages.Count(message => message.Unread))
                     : 0;
             }
+        }
+
+        internal static long? GetRecallContentBytes(string profileId)
+        {
+            lock (RecallGate)
+            {
+                EnsureRecallLoaded();
+                if (recallStorageError != null) return null;
+                Dictionary<string, RecallThread> threads;
+                if (!recalled.TryGetValue(profileId, out threads)) return 0;
+
+                long bytes = 0;
+                foreach (var thread in threads.Values)
+                foreach (var message in thread.Messages)
+                {
+                    if (message.Content != null) bytes += Encoding.UTF8.GetByteCount(message.Content);
+                    var attachment = message.Attachment;
+                    if (attachment != null)
+                        bytes += RecallMediaBytes(attachment.Data) + RecallMediaBytes(attachment.PreviewData);
+                }
+                return bytes;
+            }
+        }
+
+        internal static long RecallMediaBytes(string data)
+        {
+            if (String.IsNullOrEmpty(data)) return 0;
+            int padding = data.EndsWith("==", StringComparison.Ordinal) ? 2 : data.EndsWith("=", StringComparison.Ordinal) ? 1 : 0;
+            return data.Length / 4L * 3 - padding;
         }
 
         internal static RecallConversation[] GetRecallConversations(string profileId)

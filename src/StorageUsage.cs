@@ -11,7 +11,8 @@ namespace ZaloManagerPoc
     {
         public long DataBytes, AppBytes;
         public bool Incomplete;
-        public string Text { get { return (Incomplete ? "≥ " : "") + Format(DataBytes + AppBytes); } }
+        public long TotalBytes { get { return DataBytes + AppBytes; } }
+        public string Text { get { return (Incomplete ? "≥ " : "") + Format(TotalBytes); } }
         public string Details { get { return "Data và bản khôi phục: " + Format(DataBytes) + "\nApp và các phiên bản được giữ lại: " + Format(AppBytes) +
             "\nTính dung lượng tệp trên đĩa; bỏ qua liên kết. Không gồm file xuất, tệp tải ngoài thư mục hoặc dữ liệu trên cloud." +
             (Incomplete ? "\nMột số tệp/thư mục không đọc được, số liệu chưa đầy đủ." : "") + "\nCập nhật dung lượng khoảng 2 phút/lần."; } }
@@ -88,24 +89,52 @@ namespace ZaloManagerPoc
     {
         private bool storageScanning;
         private readonly Dictionary<Profile, DateTime> storageChecked = new Dictionary<Profile, DateTime>();
+
+        private void RefreshProfileStorageTotal()
+        {
+            if (profileStorageTotal == null) return;
+            var measured = rows.Where(profile => profile.MeasuredStorage != null).Select(profile => profile.MeasuredStorage).ToArray();
+            bool pending = measured.Length < rows.Count;
+            string total = pending && measured.Length == 0 ? "Đang tính…"
+                : ((pending || measured.Any(usage => usage.Incomplete)) ? "≥ " : "")
+                    + StorageMeasurement.Format(measured.Sum(usage => usage.TotalBytes));
+            profileStorageTotal.Text = "Tổng: " + total;
+        }
+
         private async void RefreshStorageUsage()
         {
+            RefreshProfileStorageTotal();
             if (storageScanning) return;
             var pending = rows.Where(p => !storageChecked.ContainsKey(p) || DateTime.UtcNow - storageChecked[p] > TimeSpan.FromMinutes(2)).ToArray();
             if (pending.Length == 0) return;
             storageScanning = true;
+            var measurements = new List<KeyValuePair<Profile, StorageMeasurement>>(pending.Length);
             try
             {
                 foreach (var profile in pending)
                 {
-                    var usage = await Task.Run(() => StorageUsage.Measure(profile));
-                    profile.StorageUsage = usage.Text; profile.StorageDetails = usage.Details;
-                    storageChecked[profile] = DateTime.UtcNow;
+                    var usage = await Task.Run(() => StorageUsage.Measure(profile)).ConfigureAwait(false);
+                    measurements.Add(new KeyValuePair<Profile, StorageMeasurement>(profile, usage));
                 }
-                grid.Items.Refresh();
             }
             catch (Exception exception) { Store.Log(exception); }
-            finally { storageScanning = false; }
+
+            try
+            {
+                // The first scan can start before WPF installs a synchronization context.
+                await Dispatcher.InvokeAsync(new Action(delegate
+                {
+                    storageScanning = false;
+                    foreach (var measurement in measurements)
+                    {
+                        measurement.Key.MeasuredStorage = measurement.Value;
+                        storageChecked[measurement.Key] = DateTime.UtcNow;
+                    }
+                    grid.Items.Refresh();
+                    RefreshProfileStorageTotal();
+                })).Task.ConfigureAwait(false);
+            }
+            catch (TaskCanceledException) { /* The dispatcher is shutting down. */ }
         }
     }
 }

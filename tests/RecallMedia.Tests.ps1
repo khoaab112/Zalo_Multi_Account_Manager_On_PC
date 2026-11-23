@@ -85,6 +85,9 @@ if ($Stage -eq 'Capture') {
     if (!$allowCdn.Invoke($null, @([uri]'https://file-stal-18.dlfl.vn/file')) -or
         $allowCdn.Invoke($null, @([uri]'https://file-stal-18.dlfl.vn.example.com/file')) -or
         $allowCdn.Invoke($null, @([uri]'https://unrelated.dlfl.vn/file'))) { throw 'Zalo file CDN host matching failed' }
+    if (!$allowCdn.Invoke($null, @([uri]'https://video-stal-41.dlmd.me/video')) -or
+        $allowCdn.Invoke($null, @([uri]'https://video-stal-41.dlmd.me.example.com/video')) -or
+        $allowCdn.Invoke($null, @([uri]'https://unrelated.dlmd.me/video'))) { throw 'Zalo video CDN host matching failed' }
 
     $local = $watcher.GetMethod('ReadDownloadedRecallFile', $flags)
     $folder = [IO.Path]::GetDirectoryName($Fixture)
@@ -120,14 +123,14 @@ if ($Stage -eq 'Capture') {
         $accept.Invoke($tracker, $inputs)
         if ($row.recalled) { $accept.Invoke($tracker, $inputs) }
     }
-    if ($watcher::GetRecalledCount($profile.Id) -ne 6) { throw 'Recall count, deduplication or sender exclusion failed.' }
+    if ($watcher::GetRecalledCount($profile.Id) -ne $fixtureData.expected.Count) { throw 'Recall count, deduplication or sender exclusion failed.' }
     if ($watcher::GetRecalledCount('900002') -ne 0) { throw 'Recall appeared in the wrong profile.' }
     if (!(Test-Path -LiteralPath $Archive -PathType Leaf)) { throw 'Recall archive was not saved.' }
-    'PASS CDP response parser: 6 recall entries, duplicates ignored, other profiles untouched'
+    'PASS CDP response parser, including recall before the original card could be read'
     return
 }
 
-if ($watcher::GetRecalledCount($profile.Id) -ne 6) { throw 'Recall count did not survive restart.' }
+if ($watcher::GetRecalledCount($profile.Id) -ne $fixtureData.expected.Count) { throw 'Recall count did not survive restart.' }
 $profile.Name = 'Recall media test'
 $shortcutPath = Join-Path (Split-Path -Parent $Fixture) 'profile.lnk'
 try {
@@ -143,6 +146,14 @@ try {
 }
 finally { if ([IO.File]::Exists($shortcutPath)) { [IO.File]::Delete($shortcutPath) } }
 $read = $watcher.GetMethod('ReadRecallConversation', $flags)
+function Get-RecallActions([Windows.DependencyObject]$element) {
+    if ($element -is [Windows.Controls.Button]) {
+        [Windows.Automation.AutomationProperties]::GetName($element)
+    }
+    foreach ($child in [Windows.LogicalTreeHelper]::GetChildren($element)) {
+        if ($child -is [Windows.DependencyObject]) { Get-RecallActions $child }
+    }
+}
 $manager = New-Object ZaloManagerPoc.ManagerWindow
 try {
     $readText = $manager.GetType().GetMethod('ReadRecallText', $flags)
@@ -158,6 +169,10 @@ try {
             if ($messages.Length -ne 1) { throw "Missing recall entry $($expected.id)." }
             $message = $messages[0]
             $attachment = $message.GetType().GetField('Attachment', $instance).GetValue($message)
+            if (!$expected.kind) {
+                if ($attachment -or !$message.Content) { throw 'Missing-content recall should report the event without media.' }
+                continue
+            }
             $attachmentType = $attachment.GetType()
             if ($attachmentType.GetField('Kind', $instance).GetValue($attachment) -ne $expected.kind) {
                 throw "Incorrect media type for $($expected.id)."
@@ -172,13 +187,18 @@ try {
             $inputs = New-Object 'System.Object[]' 2
             $inputs[0] = $message
             $inputs[1] = $manager.PSObject.BaseObject
-            $body = $bubble.Invoke($manager, $inputs).Child.Children
-            $actions = @($body | Where-Object { $_ -is [Windows.Controls.WrapPanel] })
-            $images = @($body | Where-Object { $_ -is [Windows.Controls.Image] })
-            $expectedButtons = if (!$expected.sha256) { 0 } else { 2 }
-            $expectedImages = if ($expected.kind -in @('image','sticker')) { 1 } else { 0 }
-            $buttonCount = if ($actions.Count) { $actions[0].Children.Count } else { 0 }
-            if ($buttonCount -ne $expectedButtons -or $images.Count -ne $expectedImages) {
+            $view = $bubble.Invoke($manager, $inputs)
+            $view.Measure([Windows.Size]::new(340, [double]::PositiveInfinity))
+            $actions = @(Get-RecallActions $view)
+            $expectedAction = switch ($expected.kind) {
+                'image' { 'Ph?ng to' }
+                'sticker' { 'Ph?ng to' }
+                'file' { '??c t?p' }
+                'audio' { 'Nghe' }
+                'video' { 'Xem video' }
+            }
+            if (($expected.sha256 -and ($actions.Count -ne 2 -or !($actions -like $expectedAction) -or '' -in $actions)) -or
+                (!$expected.sha256 -and $actions.Count -ne 0) -or $view.DesiredSize.Height -le 0) {
                 throw "Incorrect actions or preview for $($expected.id)."
             }
             "PASS $($expected.id): archived bytes and UI"

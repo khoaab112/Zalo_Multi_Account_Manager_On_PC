@@ -120,7 +120,7 @@ namespace ZaloManagerPoc
             return host.Equals("zadn.vn", StringComparison.OrdinalIgnoreCase) || host.EndsWith(".zadn.vn", StringComparison.OrdinalIgnoreCase)
                 || host.Equals("zdn.vn", StringComparison.OrdinalIgnoreCase) || host.EndsWith(".zdn.vn", StringComparison.OrdinalIgnoreCase)
                 || host.Equals("zaloapp.com", StringComparison.OrdinalIgnoreCase) || host.EndsWith(".zaloapp.com", StringComparison.OrdinalIgnoreCase)
-                || Regex.IsMatch(host, @"\Afile-stal-[0-9]+\.dlfl\.vn\z", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+                || Regex.IsMatch(host, @"\A(?:file-stal-[0-9]+\.dlfl\.vn|video-stal-[0-9]+\.dlmd\.me)\z", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
         }
 
         private sealed class RecallMediaUnavailable : Exception

@@ -9,7 +9,7 @@ namespace ZaloManagerPoc
             const voice = find('.voice-message, .voice-message-old, .audio-message, audio');
             const file = find('.file-message, .file-message-v2');
             const photo = find('.photo-message-v2, .image-message, .card--picture');
-            const video = find('.video-message, .video-message-v2, .file-video-message, .videoContainer__video--video-message, .videoContainer__video--file-message, .card--video, video');
+            const video = find('.video-msg-container, .video-message, .video-message-v2, .video-message__non-caption-wrapper, .video-message__video-player, .file-video-message, .videoContainer__video--video-message, .videoContainer__video--file-message, .card--video, .videoContainer, video');
             const text = find('.text-message__container .text');
             const safeSource = value => {
                 if (typeof value !== 'string' || !value || value.length > 8192) return '';
@@ -18,11 +18,12 @@ namespace ZaloManagerPoc
                     const url = new URL(value);
                     if (url.protocol !== 'https:' || url.username || url.password || url.port) return '';
                     if (url.searchParams.has('e2esession')) return '';
-                    if (/(^|\.)(zadn\.vn|zdn\.vn|zaloapp\.com)$/i.test(url.hostname) || /^file-stal-[0-9]+\.dlfl\.vn$/i.test(url.hostname)) return url.href;
+                    if (/(^|\.)(zadn\.vn|zdn\.vn|zaloapp\.com)$/i.test(url.hostname) || /^file-stal-[0-9]+\.dlfl\.vn$/i.test(url.hostname)
+                        || /^video-stal-[0-9]+\.dlmd\.me$/i.test(url.hostname)) return url.href;
                 } catch (error) { }
                 return '';
             };
-            const renderedPayloads = (node, voiceCard = false) => {
+            const renderedPayloads = (node, mediaCard = false) => {
                 if (!needMedia) return [];
                 const key = Object.keys(node).find(name => /^__react(Fiber|InternalInstance)\$/.test(name));
                 if (!key) return [];
@@ -40,7 +41,7 @@ namespace ZaloManagerPoc
                     const props = fiber.memoizedProps;
                     if (props) {
                         const models = [props.message, props.messageInfo, props.sticker];
-                        if (voiceCard) models.push(props.data, props.transformedData);
+                        if (mediaCard) models.push(props.data, props.transformedData);
                         for (const model of models) {
                             if (!model || typeof model !== 'object') continue;
                             // An enclosing component can supply media only for this exact message.
@@ -110,8 +111,8 @@ namespace ZaloManagerPoc
             };
             if (video) {
                 const player = video.matches('video') ? video : video.querySelector('video');
-                const src = player && (player.currentSrc || player.src || player.querySelector('source')?.src);
-                return { kind: 'video', preview: 'Video', source: payloadSource(renderedPayloads(video), ['oriUrl', 'videoUrl', 'href']) || safeSource(src) ||
+                const src = player && (player.currentSrc || player.getAttribute('src') || player.querySelector('source')?.getAttribute('src'));
+                return { kind: 'video', preview: 'Video', source: payloadSource(renderedPayloads(video, true), ['oriUrl', 'videoUrl', 'fileUrl', 'href']) || safeSource(src) ||
                     regionSource(video, false, ['data-download-url', 'data-video-url', 'data-file-url', 'data-url', 'href']) };
             }
             if (sticker || photo) {

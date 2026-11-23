@@ -2,6 +2,7 @@ using System;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
+using System.Windows.Documents;
 using System.Windows.Markup;
 using System.Windows.Media;
 namespace ZaloManagerPoc
@@ -9,17 +10,25 @@ namespace ZaloManagerPoc
     public class ConfirmDialog : Window
     {
         public ConfirmDialog(string title, string prefix, string target, string note, string confirmText, bool danger)
+            : this(title, prefix, target, note, confirmText, danger, false) { }
+
+        private ConfirmDialog(string title, string prefix, string target, string note, string confirmText, bool danger, bool recallDeletion)
         {
-            Title=title; Width=460; SizeToContent=SizeToContent.Height;
+            Title=title; Width=recallDeletion ? 574 : 460; SizeToContent=SizeToContent.Height;
             WindowStyle=WindowStyle.None; AllowsTransparency=true; Background=Brushes.Transparent;
             ResizeMode=ResizeMode.NoResize; ShowInTaskbar=false; WindowStartupLocation=WindowStartupLocation.CenterOwner; FontFamily=new FontFamily("Segoe UI");
             Grid design;
-            using(var stream=typeof(ConfirmDialog).Assembly.GetManifestResourceStream("ZaloManager.ConfirmDialog.xaml"))
+            string resource = recallDeletion ? "ZaloManager.RecallDeleteConfirmation.xaml" : "ZaloManager.ConfirmDialog.xaml";
+            using(var stream=typeof(ConfirmDialog).Assembly.GetManifestResourceStream(resource))
                 design=(Grid)XamlReader.Load(stream);
             Content=design;
             ((TextBlock)design.FindName("TxtTitle")).Text=title;
-            ((TextBlock)design.FindName("TxtMessagePrefix")).Text=prefix;
-            ((TextBlock)design.FindName("TxtMessageSuffix")).Text="?";
+            if (recallDeletion) ((Run)design.FindName("TxtMessagePrefix")).Text = prefix;
+            else
+            {
+                ((TextBlock)design.FindName("TxtMessagePrefix")).Text = prefix;
+                ((TextBlock)design.FindName("TxtMessageSuffix")).Text = "?";
+            }
             ((TextBlock)design.FindName("TxtTargetName")).Text=target;
             if(String.IsNullOrWhiteSpace(target)) ((Border)design.FindName("TargetPill")).Visibility=Visibility.Collapsed;
             ((TextBlock)design.FindName("TxtNote")).Text=note;
@@ -28,8 +37,9 @@ namespace ZaloManagerPoc
             confirm.Style=(Style)design.Resources[danger?"DangerConfirmButton":"PrimaryConfirmButton"];
             confirm.Click+=delegate{DialogResult=true;};
             ((Button)design.FindName("BtnCancel")).Click+=delegate{DialogResult=false;};
-            var card=(Border)design.Children[0];var layout=(Grid)card.Child;var header=(Grid)layout.Children[0];
-            ((Button)header.Children[2]).Click+=delegate{DialogResult=false;};
+            var header = recallDeletion ? (Grid)design.FindName("DialogHeader") : (Grid)((Grid)((Border)design.Children[0]).Child).Children[0];
+            var close = recallDeletion ? (Button)design.FindName("BtnClose") : (Button)header.Children[2];
+            close.Click+=delegate{DialogResult=false;};
             header.MouseLeftButtonDown+=delegate(object sender,MouseButtonEventArgs e){
                 if(e.ChangedButton!=MouseButton.Left)return;
                 DependencyObject child=e.OriginalSource as DependencyObject;
@@ -44,5 +54,17 @@ namespace ZaloManagerPoc
         }
         public static bool Ask(Window owner,string title,string prefix,string target,string note,string confirmText,bool danger=true)
         {return new ConfirmDialog(title,prefix,target,note,confirmText,danger){Owner=owner}.ShowDialog()==true;}
+
+        internal static bool AskRecallDeletion(Window owner, string profileName, string conversationName)
+        {
+            bool wholeProfile = conversationName == null;
+            string prefix = wholeProfile ? "Xóa toàn bộ tin thu hồi của " : "Xóa toàn bộ tin thu hồi trong cuộc trò chuyện với ";
+            string target = wholeProfile ? profileName : conversationName;
+            string note = wholeProfile
+                ? "Các tin đã đọc và chưa đọc của tài khoản này sẽ bị xóa khỏi máy."
+                : "Các tin đã đọc và chưa đọc trong cuộc trò chuyện này sẽ bị xóa khỏi máy.";
+            return new ConfirmDialog("Xóa tất cả tin thu hồi", prefix, target, note, "Xóa tất cả", true, true)
+                { Owner = owner }.ShowDialog() == true;
+        }
     }
 }

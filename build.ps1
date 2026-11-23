@@ -14,6 +14,7 @@ $arguments += '/resource:' + (Join-Path $PSScriptRoot 'assets\app.ico') + ',Zalo
 $arguments += $references | ForEach-Object { "/r:$_" }
 $arguments += @('WindowsBase.dll','PresentationCore.dll','PresentationFramework.dll','UIAutomationClient.dll','UIAutomationTypes.dll') | ForEach-Object { "/r:$wpf\$_" }
 $arguments += '/resource:' + (Join-Path $PSScriptRoot 'src\ConfirmDialog.xaml') + ',ZaloManager.ConfirmDialog.xaml'
+$arguments += '/resource:' + (Join-Path $PSScriptRoot 'src\RecallDeleteConfirmation.xaml') + ',ZaloManager.RecallDeleteConfirmation.xaml'
 $arguments += '/resource:' + (Join-Path $PSScriptRoot 'src\ModernContextMenu.xaml') + ',ZaloManager.ModernContextMenu.xaml'
 $arguments += Get-ChildItem -LiteralPath (Join-Path $PSScriptRoot 'src') -Filter '*.cs' | Select-Object -ExpandProperty FullName
 $arguments += '/resource:' + (Join-Path $PSScriptRoot 'src\Theme.xaml') + ',ZaloManager.Theme.xaml'

@@ -10,44 +10,208 @@ namespace ZaloManagerPoc
 {
     public partial class ManagerWindow
     {
-        private void AddRecallMedia(StackPanel body, CdpMessageWatcher.RecalledMessage message, Window owner)
+        private Border RecallAttachmentBubble(CdpMessageWatcher.RecalledMessage message, Window owner)
         {
             var attachment = message.Attachment;
-            if (attachment == null || attachment.Kind == "emoji") return;
             bool picture = attachment.Kind == "image" || attachment.Kind == "sticker";
             var image = picture ? DecodeRecallMediaImage(attachment) : null;
-            if (image != null)
+            if (image != null) return RecallPictureBubble(message, owner, image);
+
+            bool audio = attachment.Kind == "audio";
+            bool video = IsRecallVideo(message);
+            bool saved = !String.IsNullOrEmpty(attachment.Data);
+            string fileName = RecallAttachmentName(message);
+            string title = audio ? "Tin nhắn thoại" : picture ? (attachment.Kind == "sticker" ? "Sticker" : "Ảnh") : fileName;
+            var row = new Grid { MinHeight = 58 };
+            row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            row.ColumnDefinitions.Add(new ColumnDefinition());
+            row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+
+            var tile = new Border { Width = 50, Height = 50, CornerRadius = new CornerRadius(10),
+                Background = audio && saved ? Brushes.Transparent : ModernBrush(video ? "#26384D" : "#EAF2FF"),
+                VerticalAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(0, 0, 12, 0) };
+            row.Children.Add(tile);
+            if (video && !String.IsNullOrEmpty(attachment.PreviewData))
             {
-                body.Children.Add(new Image
-                {
-                    Source = image, MaxWidth = 320, MaxHeight = 260, Stretch = Stretch.Uniform,
-                    HorizontalAlignment = HorizontalAlignment.Left, Margin = new Thickness(0, 6, 0, 0)
-                });
+                var thumbnail = DecodeRecallImageBytes(attachment.PreviewData);
+                if (thumbnail != null) tile.Background = new ImageBrush(thumbnail) { Stretch = Stretch.UniformToFill };
+            }
+            string playIcon = "M 4,2 L 14,8 L 4,14 Z";
+            string fileIcon = "M 4,1 H 10 L 14,5 V 15 H 4 Z M 10,1 V 5 H 14 M 6,8 H 12 M 6,11 H 12";
+            bool readable = saved && !video && attachment.Kind == "file"
+                && String.Equals(Path.GetExtension(fileName), ".txt", StringComparison.OrdinalIgnoreCase);
+            if (saved && (video || readable))
+            {
+                string action = video ? "Xem video" : "Đọc tệp";
+                var button = RecallIconButton(action, video ? playIcon : fileIcon, video ? "#26384D" : "#EAF2FF",
+                    video ? "#FFFFFF" : "#1265CB", video ? 30 : 40,
+                    delegate { if (readable) ShowRecallText(message, owner); else PlayRecallVideo(message, owner); }, video);
+                if (video) button.Opacity = 0.92;
+                tile.Child = button;
+            }
+            else if (!audio || !saved)
+                tile.Child = RecallIcon(audio || video ? playIcon : fileIcon, ModernBrush(video ? "#FFFFFF" : "#1265CB"), audio || video);
+
+            var details = new StackPanel { VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 12, 0) };
+            Grid.SetColumn(details, 1);
+            row.Children.Add(details);
+            if (audio && saved) AddRecallAudioPlayer(tile, details, message);
+            else
+            {
+                details.Children.Add(new TextBlock { Text = title, ToolTip = title, TextTrimming = TextTrimming.CharacterEllipsis,
+                    FontWeight = FontWeights.SemiBold, FontSize = 14, Foreground = ModernBrush("#111827") });
+                string description = saved ? RecallMediaSize(attachment.Data) + " · Đã lưu" : RecallCaptureStatus(attachment.CaptureStatus);
+                details.Children.Add(new TextBlock { Text = description, TextWrapping = TextWrapping.Wrap, FontSize = 12,
+                    Foreground = ModernBrush("#64748B"), Margin = new Thickness(0, 4, 0, 0) });
             }
 
-            if (!String.IsNullOrEmpty(attachment.Data))
+            var actions = new StackPanel { VerticalAlignment = VerticalAlignment.Center, HorizontalAlignment = HorizontalAlignment.Center };
+            Grid.SetColumn(actions, 2);
+            row.Children.Add(actions);
+            if (saved) actions.Children.Add(RecallDownloadButton(message, owner));
+            var time = RecallTimestamp(message);
+            time.HorizontalAlignment = HorizontalAlignment.Center;
+            time.Margin = new Thickness(0, saved ? 4 : 0, 0, 0);
+            actions.Children.Add(time);
+
+            var bubble = RecallWhiteBubble(row, new Thickness(14, 10, 14, 10));
+            if (audio)
             {
-                var actions = new WrapPanel { Margin = new Thickness(0, 6, 0, 0) };
-                if (image != null)
-                    actions.Children.Add(RecallMediaButton("Phóng to", delegate { ShowRecallImage(image, message, owner); }));
-                else if (attachment.Kind == "audio" || IsRecallVideo(message))
-                    actions.Children.Add(RecallMediaButton(attachment.Kind == "audio" ? "Nghe" : "Xem video",
-                        delegate { PlayRecallMedia(message, owner); }));
-                else if (attachment.Kind == "file" && String.Equals(Path.GetExtension(RecallAttachmentName(message)), ".txt", StringComparison.OrdinalIgnoreCase))
-                    actions.Children.Add(RecallMediaButton("Đọc tệp", delegate { ShowRecallText(message, owner); }));
-                actions.Children.Add(RecallMediaButton(picture ? (attachment.FromSource ? "Lưu ảnh…" : "Lưu bản xem trước…")
-                    : attachment.Kind == "audio" ? "Lưu ghi âm…" : "Tải về…",
-                    delegate { SaveRecallMedia(message, owner); }));
-                body.Children.Add(actions);
-                return;
+                bubble.MaxWidth = 420;
+                bubble.HorizontalAlignment = HorizontalAlignment.Left;
+            }
+            return bubble;
+        }
+
+        private Border RecallPictureBubble(CdpMessageWatcher.RecalledMessage message, Window owner, BitmapSource image)
+        {
+            bool sticker = message.Attachment.Kind == "sticker";
+            var stage = new Grid { Width = sticker ? 140 : 220, Height = sticker ? 120 : 250, HorizontalAlignment = HorizontalAlignment.Left };
+            var picture = new Border { CornerRadius = new CornerRadius(14),
+                BorderThickness = new Thickness(sticker ? 0 : 1), BorderBrush = ModernBrush("#D6DFE8"),
+                Background = new ImageBrush(image) { Stretch = sticker ? Stretch.Uniform : Stretch.UniformToFill } };
+            var preview = new Button { Template = RecallButtonTemplate(14), Content = picture, ToolTip = "Phóng to",
+                Background = Brushes.Transparent, BorderThickness = new Thickness(0), Padding = new Thickness(0),
+                HorizontalContentAlignment = HorizontalAlignment.Stretch, VerticalContentAlignment = VerticalAlignment.Stretch,
+                Cursor = System.Windows.Input.Cursors.Hand };
+            System.Windows.Automation.AutomationProperties.SetName(preview, "Phóng to");
+            preview.Click += delegate { ShowRecallImage(image, message, owner); };
+            stage.Children.Add(preview);
+            if (!sticker && message.Attachment.FromSource && Math.Min(image.PixelWidth, image.PixelHeight) >= 720)
+            {
+                stage.Children.Add(new Border { Background = ModernBrush("#CC1E293B"), CornerRadius = new CornerRadius(4),
+                    Child = new TextBlock { Text = "HD", Foreground = Brushes.White, FontWeight = FontWeights.SemiBold, FontSize = 10 },
+                    Padding = new Thickness(5, 2, 5, 2), Margin = new Thickness(9), HorizontalAlignment = HorizontalAlignment.Left,
+                    VerticalAlignment = VerticalAlignment.Top, IsHitTestVisible = false });
+            }
+            if (!String.IsNullOrEmpty(message.Attachment.Data))
+            {
+                var download = RecallDownloadButton(message, owner);
+                download.HorizontalAlignment = HorizontalAlignment.Right;
+                download.VerticalAlignment = VerticalAlignment.Bottom;
+                download.Margin = new Thickness(8);
+                stage.Children.Add(download);
             }
 
-            body.Children.Add(new TextBlock
+            var body = new StackPanel { HorizontalAlignment = HorizontalAlignment.Left };
+            body.Children.Add(stage);
+            if (!String.IsNullOrWhiteSpace(message.Content) && message.Content != (sticker ? "Sticker" : "Ảnh"))
             {
-                Text = RecallCaptureStatus(attachment.CaptureStatus),
-                FontSize = 11, Foreground = ModernBrush("#64748B"), Margin = new Thickness(0, 4, 0, 0),
-                TextWrapping = TextWrapping.Wrap
-            });
+                var caption = RecallWhiteBubble(RecallMessageText(message.Content), new Thickness(10, 6, 10, 6));
+                caption.MaxWidth = 380;
+                caption.Margin = new Thickness(0, 6, 0, 0);
+                body.Children.Add(caption);
+            }
+            var time = RecallTimestamp(message);
+            time.Margin = new Thickness(9, 0, 9, 0);
+            body.Children.Add(new Border { Child = time, Background = ModernBrush("#D6DEE8"), CornerRadius = new CornerRadius(10),
+                Padding = new Thickness(0, 3, 0, 3), Margin = new Thickness(0, 5, 0, 0), HorizontalAlignment = HorizontalAlignment.Left });
+            return new Border { Child = body, Margin = new Thickness(0, 0, 0, 14) };
+        }
+
+        private static Border RecallWhiteBubble(UIElement body, Thickness padding)
+        {
+            return new Border { Child = body, Margin = new Thickness(0, 0, 0, 14), Padding = padding,
+                Background = Brushes.White, BorderBrush = ModernBrush("#D6DFE8"), BorderThickness = new Thickness(1),
+                CornerRadius = new CornerRadius(14) };
+        }
+
+        private static TextBox RecallMessageText(string text)
+        {
+            return new TextBox { Text = text, IsReadOnly = true, BorderThickness = new Thickness(0), Padding = new Thickness(0),
+                Background = Brushes.Transparent, TextWrapping = TextWrapping.Wrap, FontSize = 14 };
+        }
+
+        private static TextBlock RecallTimestamp(CdpMessageWatcher.RecalledMessage message)
+        {
+            return new TextBlock { Text = message.DetectedAt.ToLocalTime().ToString("HH:mm"), FontSize = 11,
+                Foreground = ModernBrush("#64748B") };
+        }
+
+        private static string RecallMediaSize(string data)
+        {
+            long bytes = CdpMessageWatcher.RecallMediaBytes(data);
+            if (bytes >= 1024 * 1024) return (bytes / (1024.0 * 1024)).ToString("0.##") + " MB";
+            if (bytes >= 1024) return (bytes / 1024.0).ToString("0.#") + " KB";
+            return bytes + " B";
+        }
+
+        private static Button RecallDownloadButton(CdpMessageWatcher.RecalledMessage message, Window owner)
+        {
+            var attachment = message.Attachment;
+            string label = attachment.Kind == "image" || attachment.Kind == "sticker"
+                ? (attachment.FromSource ? "Lưu ảnh…" : "Lưu bản xem trước…") : attachment.Kind == "audio" ? "Lưu ghi âm…" : "Tải về…";
+            var button = RecallIconButton(label, "M 8,1 V 11 M 4,7 L 8,11 L 12,7 M 2,12 V 15 H 14 V 12", "#F8FAFC", "#334155", 32,
+                delegate { SaveRecallMedia(message, owner); });
+            button.BorderBrush = ModernBrush("#CBD5E1");
+            button.BorderThickness = new Thickness(1);
+            return button;
+        }
+
+        private static Button RecallIconButton(string label, string icon, string background, string foreground, double size,
+            RoutedEventHandler click, bool filled = false)
+        {
+            var button = new Button { Width = size, Height = size, Template = RecallButtonTemplate(size / 2),
+                Background = ModernBrush(background), Content = RecallIcon(icon, ModernBrush(foreground), filled), ToolTip = label,
+                BorderThickness = new Thickness(0), Padding = new Thickness(0), HorizontalContentAlignment = HorizontalAlignment.Center,
+                VerticalContentAlignment = VerticalAlignment.Center,
+                HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center,
+                Cursor = System.Windows.Input.Cursors.Hand };
+            System.Windows.Automation.AutomationProperties.SetName(button, label);
+            if (click != null) button.Click += click;
+            return button;
+        }
+
+        private static FrameworkElement RecallIcon(string icon, Brush color, bool filled)
+        {
+            return new System.Windows.Shapes.Path { Data = Geometry.Parse(icon), Fill = filled ? color : null,
+                Stroke = filled ? null : color, StrokeThickness = 1.6, StrokeStartLineCap = PenLineCap.Round,
+                StrokeEndLineCap = PenLineCap.Round, StrokeLineJoin = PenLineJoin.Round, Width = 14, Height = 14,
+                Stretch = Stretch.Uniform, HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center };
+        }
+
+        private static ControlTemplate RecallButtonTemplate(double radius)
+        {
+            var surface = new FrameworkElementFactory(typeof(Border), "surface");
+            surface.SetValue(Border.CornerRadiusProperty, new CornerRadius(radius));
+            surface.SetValue(Border.BackgroundProperty, new TemplateBindingExtension(Control.BackgroundProperty));
+            surface.SetValue(Border.BorderBrushProperty, new TemplateBindingExtension(Control.BorderBrushProperty));
+            surface.SetValue(Border.BorderThicknessProperty, new TemplateBindingExtension(Control.BorderThicknessProperty));
+            surface.SetValue(Border.PaddingProperty, new TemplateBindingExtension(Control.PaddingProperty));
+            var content = new FrameworkElementFactory(typeof(ContentPresenter));
+            content.SetValue(ContentPresenter.HorizontalAlignmentProperty, new TemplateBindingExtension(Control.HorizontalContentAlignmentProperty));
+            content.SetValue(ContentPresenter.VerticalAlignmentProperty, new TemplateBindingExtension(Control.VerticalContentAlignmentProperty));
+            surface.AppendChild(content);
+            var template = new ControlTemplate(typeof(Button)) { VisualTree = surface };
+            foreach (var state in new[] { UIElement.IsMouseOverProperty, Button.IsPressedProperty, UIElement.IsEnabledProperty })
+            {
+                var trigger = new Trigger { Property = state, Value = state != UIElement.IsEnabledProperty };
+                double opacity = state == UIElement.IsEnabledProperty ? 0.45 : state == Button.IsPressedProperty ? 0.70 : 0.86;
+                trigger.Setters.Add(new Setter(UIElement.OpacityProperty, opacity, "surface"));
+                template.Triggers.Add(trigger);
+            }
+            return template;
         }
 
         private static string RecallCaptureStatus(string status)
@@ -221,48 +385,6 @@ namespace ZaloManagerPoc
             return viewer;
         }
 
-        private void PlayRecallMedia(CdpMessageWatcher.RecalledMessage message, Window owner)
-        {
-            string extension = Path.GetExtension(RecallAttachmentName(message));
-            string path = Path.Combine(Path.GetTempPath(), "zalo-recall-" + Guid.NewGuid().ToString("N") + extension);
-            MediaElement player = null;
-            try
-            {
-                File.WriteAllBytes(path, Convert.FromBase64String(message.Attachment.Data));
-                var viewer = RecallMediaWindow(owner, message.Content, IsRecallVideo(message) ? 510 : 200);
-                player = new MediaElement { LoadedBehavior = MediaState.Manual, UnloadedBehavior = MediaState.Close,
-                    Stretch = Stretch.Uniform, Margin = new Thickness(12, 0, 12, 12) };
-                var status = new TextBlock { TextWrapping = TextWrapping.Wrap, Margin = new Thickness(12, 0, 12, 8) };
-                player.MediaFailed += delegate { status.Text = "Windows không phát được định dạng này. Bạn có thể lưu tệp để mở bằng trình phát khác."; };
-                var actions = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(12) };
-                actions.Children.Add(RecallMediaButton("Phát", delegate { player.Play(); }));
-                actions.Children.Add(RecallMediaButton("Tạm dừng", delegate { player.Pause(); }));
-                actions.Children.Add(RecallMediaButton("Từ đầu", delegate { player.Stop(); player.Play(); }));
-                actions.Children.Add(RecallMediaButton("Tải về…", delegate { SaveRecallMedia(message, viewer); }));
-                var layout = new DockPanel();
-                DockPanel.SetDock(actions, Dock.Top);
-                DockPanel.SetDock(status, Dock.Top);
-                layout.Children.Add(actions);
-                layout.Children.Add(status);
-                layout.Children.Add(player);
-                viewer.Content = layout;
-                viewer.Loaded += delegate { player.Source = new Uri(path); player.Play(); };
-                viewer.ShowDialog();
-            }
-            catch (Exception error)
-            {
-                if (!(error is IOException) && !(error is UnauthorizedAccessException) && !(error is FormatException)) throw;
-                NoticeDialog.Show(owner, "Không mở được nội dung", error.Message);
-            }
-            finally
-            {
-                if (player != null) player.Close();
-                try { File.Delete(path); }
-                catch (IOException) { }
-                catch (UnauthorizedAccessException) { }
-            }
-        }
-
         private static BitmapSource DecodeRecallMediaImage(CdpMessageWatcher.RecallAttachment attachment)
         {
             return DecodeRecallImageBytes(attachment.Data) ?? DecodeRecallImageBytes(attachment.PreviewData);
@@ -291,12 +413,19 @@ namespace ZaloManagerPoc
         {
             var dialog = new Microsoft.Win32.SaveFileDialog { FileName = RecallAttachmentName(message), Filter = "Tất cả tệp|*.*" };
             if (dialog.ShowDialog(owner) != true) return;
-            try { File.WriteAllBytes(dialog.FileName, Convert.FromBase64String(message.Attachment.Data)); }
+            byte[] bytes;
+            try
+            {
+                bytes = Convert.FromBase64String(message.Attachment.Data);
+                File.WriteAllBytes(dialog.FileName, bytes);
+            }
             catch (Exception error)
             {
                 if (!(error is IOException) && !(error is UnauthorizedAccessException) && !(error is FormatException)) throw;
                 NoticeDialog.Show(owner, "Không lưu được bản sao", error.Message);
+                return;
             }
+            NoticeDialog.FileSaved(owner, dialog.FileName, bytes.LongLength);
         }
 
         private static bool IsRecallVideo(CdpMessageWatcher.RecalledMessage message)

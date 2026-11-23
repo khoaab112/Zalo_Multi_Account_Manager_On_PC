@@ -45,11 +45,11 @@ namespace ZaloManagerPoc
                 let watcher = window.__zaloManagerVisibleMessages;
                 if (!watcher || watcher.key !== key) {
                     if (watcher) watcher.observer.disconnect();
-                    watcher = { key: key, pending: new Map(), seen: new Set(), waiting: new Set(), reading: new Set(), sources: new Map() };
+                    watcher = { key: key, pending: new Map(), seen: new Set(), waiting: new Set(), reading: new Set(), sources: new Map(), visible: new Set() };
                     const scan = function(baseline) {
                         const pane = document.querySelector('#messageViewScroll');
                         watcher.chatOpen = !!(pane && pane.getClientRects().length);
-                        if (!watcher.chatOpen) return;
+                        if (!watcher.chatOpen) { watcher.visible.clear(); return; }
                         const title = document.querySelector('#header .header-title');
                         const selected = document.querySelector('#conversationList .conv-item.selected');
                         const row = selected && selected.closest('.msg-item[data-id]');
@@ -59,6 +59,7 @@ namespace ZaloManagerPoc
                         const selectedName = (selectedTitle && selectedTitle.innerText || '').trim().slice(0, 200);
                         if (name && selectedName && name !== selectedName) {
                             watcher.chatOpen = false;
+                            watcher.visible.clear();
                             return;
                         }
                         let avatar;
@@ -84,20 +85,26 @@ namespace ZaloManagerPoc
                             const id = (frame.id || node.id).replace(/^(message-frame_|bb_msg_id_)/, '');
                             if (id) frames.set(id, frame);
                         }
+                        const screenKey = conversation + '\n' + name;
+                        const previouslyVisible = watcher.screenKey === screenKey ? watcher.visible : new Set();
+                        watcher.screenKey = screenKey;
+                        watcher.visible = new Set();
                         for (const [id, frame] of frames) {
                             const root = frame.closest('[id^=bb_msg_id_]') || frame;
                             if (!id) continue;
+                            const outgoing = frame.classList.contains('me') || root.classList.contains('me');
                             if (root.querySelector('.undo-message, .revoked-sticker-message-content')) {
                                 watcher.waiting.delete(id);
                                 if (!watcher.seen.has('recall:' + id)) {
                                     watcher.seen.add('recall:' + id);
-                                    watcher.pending.set('recall:' + id, { id: id, recalled: true, conversation: conversation, avatar: avatarPng() });
+                                    watcher.pending.set('recall:' + id, { id: id, recalled: true, conversation: conversation,
+                                        name: name, avatar: avatarPng(), observedTransition: !baseline && !outgoing && previouslyVisible.has(id) });
                                 }
                                 continue;
                             }
+                            watcher.visible.add(id);
                             const seen = watcher.seen.has('text:' + id);
                             if (seen && !watcher.waiting.has(id)) continue;
-                            const outgoing = frame.classList.contains('me') || root.classList.contains('me');
                             let entry;
                             try { entry = readMessage(root, !outgoing, !watcher.seen.has('preview:' + id)); }
                             catch (error) {
@@ -292,8 +299,9 @@ namespace ZaloManagerPoc
                     if (row.TryGetValue("recalled", out recalled) && true.Equals(recalled))
                     {
                         CapturedMessage capture;
-                        if (captured.TryGetValue(id, out capture) && !capture.Recalled)
+                        if (captured.TryGetValue(id, out capture))
                         {
+                            if (capture.Recalled) continue;
                             capture.Recalled = true;
                             if (!capture.Outgoing)
                             {
@@ -302,6 +310,21 @@ namespace ZaloManagerPoc
                                 if (String.IsNullOrEmpty(avatar) && conversationKey == capture.ConversationId)
                                     avatar = ReadAvatar(row);
                                 RecordRecall(profile, capture.ConversationId, capture.ConversationName, avatar, id, capture.Content, capture.Attachment);
+                            }
+                        }
+                        else
+                        {
+                            object transition;
+                            if (row.TryGetValue("observedTransition", out transition) && true.Equals(transition))
+                            {
+                                string observedConversation = Text(row, "conversation");
+                                string conversationKey = String.IsNullOrWhiteSpace(observedConversation) || observedConversation.Length > 200
+                                    ? "message:" + id : "conversation:" + observedConversation;
+                                string conversationName = Text(row, "name");
+                                if (String.IsNullOrWhiteSpace(conversationName) || conversationName.Length > 200)
+                                    conversationName = "Người gửi chưa xác định";
+                                RecordRecall(profile, conversationKey, conversationName, ReadAvatar(row), id,
+                                    "Tin đã thu hồi trước khi Manager đọc được nội dung", null);
                             }
                         }
                         continue;

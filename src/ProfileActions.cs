@@ -383,15 +383,29 @@ namespace ZaloManagerPoc
                         profiles[profiles.IndexOf(profile)] = next; profile = next;
                         if (!String.IsNullOrEmpty(profile.ShortcutPath)) ProfileActions.CreateShortcut(profile);
                     }
-                    await Task.Run(() => Instance.Open(profile));
+                    bool shown = await Task.Run(() => Instance.OpenAndCheckWindow(profile));
+                    if (shown)
+                    {
+                        NoticeDialog.Success(this, "Đã mở Zalo", "Cửa sổ Zalo của hồ sơ đã sẵn sàng.", profile.Name);
+                        WindowActivation.Restore(profile);
+                    }
+                    else NoticeDialog.Show(this, "Chưa thấy cửa sổ Zalo", "Đã gửi yêu cầu mở Zalo cho hồ sơ “" + profile.Name + "”. Có thể Zalo vẫn đang khởi động.");
                 }
                 else if (action == "⏹ Dừng Zalo")
                 {
                     if (!ConfirmDialog.Ask(this, "Dừng Zalo", "Dừng toàn bộ tiến trình Zalo của ", profile.Name, "Thao tác có thể ngắt cuộc gọi và dữ liệu đang ghi.", "Dừng Zalo")) return;
                     await Task.Run(() => Instance.Stop(profile));
+                    RefreshStatus();
+                    NoticeDialog.Success(this, "Đã dừng Zalo", "Zalo đã dừng cho hồ sơ này.", profile.Name);
                 }
                 else if (action == "Mở thư mục Data") { Directory.CreateDirectory(profile.DataPath); Process.Start("explorer.exe", "\"" + profile.DataPath + "\""); }
-                else if (action == "Tạo Shortcut") { ProfileActions.CreateShortcut(profile); Store.Save(profiles); status.Text = "Đã tạo shortcut cho “" + profile.Name + "”."; }
+                else if (action == "Tạo Shortcut")
+                {
+                    ProfileActions.CreateShortcut(profile);
+                    Store.Save(profiles);
+                    NoticeDialog.Success(this, "Tạo shortcut thành công", "Lối tắt của hồ sơ đã được tạo.",
+                        Path.GetFileName(profile.ShortcutPath), Path.GetDirectoryName(profile.ShortcutPath), profile.ShortcutPath);
+                }
                 else if (action == "Xóa")
                 {
                     ProfileActions.RequireStopped(profile);
@@ -401,6 +415,8 @@ namespace ZaloManagerPoc
                     catch { if (Directory.Exists(Path.Combine(location, "data"))) Directory.Move(Path.Combine(location, "data"), profile.DataPath); throw; }
                     profiles.Remove(profile); status.Text = "Đã xóa hồ sơ. Dữ liệu giữ tại " + location;
                     if (!String.IsNullOrEmpty(profile.ShortcutPath) && File.Exists(profile.ShortcutPath)) File.Delete(profile.ShortcutPath);
+                    RefreshStatus();
+                    NoticeDialog.Success(this, "Đã xóa hồ sơ", "Dữ liệu đã được chuyển vào thư mục lưu hồ sơ đã xóa.", profile.Name, location, location);
                 }
             }
             catch (Exception exception) { Report(exception); }
@@ -431,7 +447,8 @@ namespace ZaloManagerPoc
             manualName.Click += delegate
             {
                 var dialog = new RenameProfileDialog(profile.Name, Resources) { Owner = this };
-                if (dialog.ShowDialog() == true) RunProfileEdit(profile, () => profile.Name = dialog.NewProfileName);
+                if (dialog.ShowDialog() == true && RunProfileEdit(profile, () => profile.Name = dialog.NewProfileName))
+                    NoticeDialog.Success(this, "Đã cập nhật tên hồ sơ", "Tên mới đã được lưu.", profile.Name);
             };
             rename.Items.Add(manualName);
             var zaloName = new MenuItem { Header = "Cập nhật theo tên Zalo hiện tại" };
@@ -443,14 +460,14 @@ namespace ZaloManagerPoc
             {
                 var dialog = new Microsoft.Win32.OpenFileDialog { Filter = "Ảnh|*.png;*.jpg;*.jpeg;*.bmp", Title = "Chọn avatar cho tài khoản clone" };
                 if (dialog.ShowDialog(this) != true) return;
-                RunProfileEdit(profile, delegate
+                if (RunProfileEdit(profile, delegate
                 {
                     var image = new BitmapImage(); image.BeginInit(); image.CacheOption = BitmapCacheOption.OnLoad; image.UriSource = new Uri(dialog.FileName); image.EndInit(); image.Freeze();
                     string path = Path.Combine(Store.Root, "Avatars", profile.Id + "-" + Guid.NewGuid().ToString("N") + ".png");
                     Directory.CreateDirectory(Path.GetDirectoryName(path));
                     var encoder = new PngBitmapEncoder(); encoder.Frames.Add(BitmapFrame.Create(image)); using (var stream = File.Create(path)) encoder.Save(stream);
                     profile.AvatarPath = path; ProfileActions.ApplyAvatar(profile);
-                });
+                })) NoticeDialog.Success(this, "Đã cập nhật avatar", "Ảnh đại diện mới đã được lưu cho hồ sơ.", profile.Name);
             };
             avatar.Items.Add(manualAvatar);
             var zaloAvatar = new MenuItem { Header = "Cập nhật theo avatar Zalo hiện tại" };
@@ -491,6 +508,7 @@ namespace ZaloManagerPoc
                     if (!RunProfileEdit(profile, () => profile.Name = identity.Name)) return;
                 }
                 status.Text = avatar ? "Đã cập nhật avatar cho hồ sơ, taskbar và shortcut Desktop." : "Đã cập nhật tên hồ sơ theo Zalo hiện tại.";
+                NoticeDialog.Success(this, avatar ? "Đã cập nhật avatar" : "Đã cập nhật tên hồ sơ", status.Text, profile.Name);
             }
             catch (Exception exception) { Report(exception); }
             finally { SetBusy(false); RefreshStatus(); }
@@ -520,6 +538,8 @@ namespace ZaloManagerPoc
                         target.Name = IdentityReader.Read(target).Name ?? target.Name;
                         profiles.Add(target); Store.Save(profiles); grid.SelectedItem = target;
                         status.Text = "Đã nhập vào hồ sơ mới, chưa mở Zalo. Cần kiểm tra đăng nhập, tin nhắn và tệp.";
+                        RefreshStatus();
+                        NoticeDialog.Success(this, "Đã nhập thành hồ sơ mới", status.Text, target.Name);
                         return;
                     }
                 }
@@ -531,6 +551,8 @@ namespace ZaloManagerPoc
                 status.Text = "Đang xử lý dữ liệu. Clone đang chạy sẽ được tự dừng và mở lại sau khi hoàn tất…";
                 await Task.Run(() => ProfileActions.TransferWithRestart(profile, path, import));
                 status.Text = import ? "Đã thay dữ liệu, kiểm tra ID tài khoản và giữ bản cũ. Cần kiểm tra đăng nhập, tin nhắn và tệp trong Zalo." : "Đã xuất thư mục data của clone và kiểm tra SHA-256. Không gồm tệp tải ngoài thư mục; chưa xác minh khôi phục phiên đăng nhập.";
+                if (import) NoticeDialog.Success(this, "Đã nhập dữ liệu", status.Text, profile.Name);
+                else NoticeDialog.FileSaved(this, path, new FileInfo(path).Length, "Xuất dữ liệu thành công");
             }
             catch (Exception exception) { Report(exception); }
             finally { SetBusy(false); RefreshStatus(); }

@@ -14,7 +14,10 @@ namespace ZaloManagerPoc
         private Border sourceBanner;
         private readonly TextBlock baseVersion = new TextBlock();
         private readonly TextBlock baseSignature = new TextBlock { Text = "Chưa xác minh" };
+        private readonly Border profileNameError = new Border { Visibility = Visibility.Collapsed };
+        private const string ProfileNameRequired = "Vui lòng nhập tên hồ sơ.";
         private TextBlock profileCount;
+        private TextBlock profileStorageTotal;
 
         private static Brush ModernBrush(string color) { return (Brush)new BrushConverter().ConvertFromString(color); }
         private static void Detach(FrameworkElement element)
@@ -100,11 +103,25 @@ namespace ZaloManagerPoc
             var baseCard = Card(baseBody); baseCard.Padding = new Thickness(18); baseCard.Margin = new Thickness(0, 0, 0, 16); Grid.SetRow(baseCard, 1); root.Children.Add(baseCard);
 
             var addRow = new Grid { Margin = new Thickness(0, 0, 0, 14) }; addRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto }); addRow.ColumnDefinitions.Add(new ColumnDefinition());
+            addRow.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+            addRow.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
             toolbar.Margin = new Thickness(0); name.Style = (Style)Resources["ModernTextBox"]; name.Width = 300; name.Height = 42; name.Margin = new Thickness(0); name.Text = "";
             toolbar.Children.Remove(name);
             var input = new Grid(); input.Children.Add(name);
             var placeholder = new TextBlock { Text = "Nhập tên tài khoản mới…", IsHitTestVisible = false, Foreground = ModernBrush("#94A3B8"), Margin = new Thickness(14, 0, 0, 0), VerticalAlignment = VerticalAlignment.Center };
-            placeholder.SetBinding(VisibilityProperty, new Binding("Text") { Source = name, Converter = new EmptyTextVisibilityConverter() }); input.Children.Add(placeholder); toolbar.Children.Insert(0, input);
+            placeholder.SetBinding(VisibilityProperty, new Binding("Text") { Source = name, Converter = new EmptyTextVisibilityConverter() }); input.Children.Add(placeholder);
+            var errorOutline = new Border { BorderThickness = new Thickness(2), BorderBrush = ModernBrush("#DC2626"),
+                CornerRadius = new CornerRadius(8), IsHitTestVisible = false };
+            errorOutline.SetBinding(VisibilityProperty, new Binding("Visibility") { Source = profileNameError });
+            input.Children.Add(errorOutline);
+            toolbar.Children.Insert(0, input);
+            System.Windows.Automation.AutomationProperties.SetName(name, "Tên hồ sơ mới");
+            name.TextChanged += delegate
+            {
+                if (profileNameError.Visibility != Visibility.Visible || String.IsNullOrWhiteSpace(name.Text)) return;
+                profileNameError.Visibility = Visibility.Collapsed;
+                name.ClearValue(System.Windows.Automation.AutomationProperties.HelpTextProperty);
+            };
             foreach (var child in toolbar.Children)
             {
                 var button = child as Button;
@@ -112,8 +129,28 @@ namespace ZaloManagerPoc
                 button.Style = (Style)Resources["PrimaryButton"]; button.Content = "+ Thêm hồ sơ"; button.Height = 42; button.Margin = new Thickness(10, 0, 0, 0); button.Padding = new Thickness(16, 9, 16, 9);
             }
             addRow.Children.Add(toolbar);
-            profileCount = new TextBlock { FontSize = 13, Foreground = ModernBrush("#64748B"), VerticalAlignment = VerticalAlignment.Center, HorizontalAlignment = HorizontalAlignment.Right };
-            Grid.SetColumn(profileCount, 1); addRow.Children.Add(profileCount); Grid.SetRow(addRow, 2); root.Children.Add(addRow);
+            profileNameError.Background = ModernBrush("#FEF2F2");
+            profileNameError.BorderBrush = ModernBrush("#FECACA");
+            profileNameError.BorderThickness = new Thickness(1);
+            profileNameError.CornerRadius = new CornerRadius(8);
+            profileNameError.Width = name.Width;
+            profileNameError.HorizontalAlignment = HorizontalAlignment.Left;
+            profileNameError.Margin = new Thickness(0, 6, 0, 0);
+            profileNameError.Padding = new Thickness(11, 6, 11, 6);
+            profileNameError.Child = new TextBlock { Text = "⚠  " + ProfileNameRequired, FontWeight = FontWeights.SemiBold,
+                FontSize = 13, Foreground = ModernBrush("#991B1B"), TextWrapping = TextWrapping.Wrap };
+            Grid.SetRow(profileNameError, 1);
+            addRow.Children.Add(profileNameError);
+            var profileSummary = new StackPanel { Orientation = Orientation.Horizontal,
+                HorizontalAlignment = HorizontalAlignment.Right, VerticalAlignment = VerticalAlignment.Center };
+            profileStorageTotal = new TextBlock { FontWeight = FontWeights.SemiBold };
+            var storageTotalBadge = Badge(profileStorageTotal, "#E6EDF6", "#334155");
+            storageTotalBadge.Margin = new Thickness(0, 0, 12, 0);
+            storageTotalBadge.ToolTip = "Tổng cột Data chiếm dụng của các hồ sơ trong bảng, gồm dữ liệu và ứng dụng. Dấu ≥ cho biết chưa đo được đầy đủ.";
+            profileSummary.Children.Add(storageTotalBadge);
+            profileCount = new TextBlock { FontSize = 13, Foreground = ModernBrush("#64748B"), VerticalAlignment = VerticalAlignment.Center };
+            profileSummary.Children.Add(profileCount);
+            Grid.SetColumn(profileSummary, 1); addRow.Children.Add(profileSummary); Grid.SetRow(addRow, 2); root.Children.Add(addRow);
             StyleProfileTable();
             var table = Card(grid); table.ClipToBounds = true; Grid.SetRow(table, 3); root.Children.Add(table);
             grid.SizeChanged += delegate
@@ -142,9 +179,7 @@ namespace ZaloManagerPoc
             var selectedCell = new Trigger { Property = DataGridCell.IsSelectedProperty, Value = true }; selectedCell.Setters.Add(new Setter(Control.BackgroundProperty, Brushes.Transparent)); selectedCell.Setters.Add(new Setter(Control.ForegroundProperty, ModernBrush("#0F172A"))); cellStyle.Triggers.Add(selectedCell); grid.CellStyle = cellStyle;
             var headerStyle = new Style(typeof(DataGridColumnHeader)); headerStyle.Setters.Add(new Setter(Control.BackgroundProperty, ModernBrush("#F8FAFC"))); headerStyle.Setters.Add(new Setter(Control.ForegroundProperty, ModernBrush("#64748B"))); headerStyle.Setters.Add(new Setter(Control.FontSizeProperty, 10.5)); headerStyle.Setters.Add(new Setter(Control.FontWeightProperty, FontWeights.Bold)); headerStyle.Setters.Add(new Setter(Control.BorderThicknessProperty, new Thickness(0, 0, 0, 1))); headerStyle.Setters.Add(new Setter(Control.BorderBrushProperty, ModernBrush("#E2E8F0"))); headerStyle.Setters.Add(new Setter(Control.PaddingProperty, new Thickness(12, 0, 0, 0))); grid.ColumnHeaderStyle = headerStyle;
             grid.Columns.Clear();
-            var avatar = new FrameworkElementFactory(typeof(Border)); avatar.SetValue(WidthProperty, 38.0); avatar.SetValue(HeightProperty, 38.0); avatar.SetValue(Border.CornerRadiusProperty, new CornerRadius(19)); avatar.SetBinding(Border.BackgroundProperty, new Binding("AvatarBackground"));
-            var initials = new FrameworkElementFactory(typeof(TextBlock)); initials.SetBinding(TextBlock.TextProperty, new Binding("Initials")); initials.SetBinding(VisibilityProperty, new Binding("InitialsVisibility")); initials.SetValue(TextBlock.ForegroundProperty, Brushes.White); initials.SetValue(TextBlock.FontWeightProperty, FontWeights.Bold); initials.SetValue(HorizontalAlignmentProperty, HorizontalAlignment.Center); initials.SetValue(VerticalAlignmentProperty, VerticalAlignment.Center); avatar.AppendChild(initials);
-            grid.Columns.Add(new DataGridTemplateColumn { Header = "Avatar", Width = 72, CellTemplate = new DataTemplate { VisualTree = avatar } });
+            grid.Columns.Add(new DataGridTemplateColumn { Header = "Avatar", Width = 72, CellTemplate = ProfileAvatarTemplate() });
             var names = new FrameworkElementFactory(typeof(StackPanel)); names.SetValue(MarginProperty, new Thickness(12, 0, 8, 0)); names.SetValue(VerticalAlignmentProperty, VerticalAlignment.Center);
             var title = new FrameworkElementFactory(typeof(TextBlock)); title.SetBinding(TextBlock.TextProperty, new Binding("Name")); title.SetValue(TextBlock.FontWeightProperty, FontWeights.SemiBold); title.SetValue(TextBlock.FontSizeProperty, 14.0); title.SetValue(TextBlock.TextTrimmingProperty, TextTrimming.CharacterEllipsis); names.AppendChild(title);
             var subtitle = new FrameworkElementFactory(typeof(TextBlock)); subtitle.SetBinding(TextBlock.TextProperty, new Binding("SubLabel")); subtitle.SetValue(TextBlock.ForegroundProperty, ModernBrush("#94A3B8")); subtitle.SetValue(TextBlock.FontSizeProperty, 11.5); names.AppendChild(subtitle);
@@ -166,6 +201,62 @@ namespace ZaloManagerPoc
                 column.HeaderTemplate = new DataTemplate { VisualTree = caption };
             }
         }
+
+        private DataTemplate ProfileAvatarTemplate()
+        {
+            const double size = 38;
+            var circle = new CornerRadius(size / 2);
+            var layers = new FrameworkElementFactory(typeof(Grid));
+            var avatar = new FrameworkElementFactory(typeof(Border));
+            avatar.SetValue(Border.CornerRadiusProperty, circle);
+            avatar.SetBinding(Border.BackgroundProperty, new Binding("AvatarBackground"));
+            var initials = new FrameworkElementFactory(typeof(TextBlock), "initials");
+            initials.SetBinding(TextBlock.TextProperty, new Binding("Initials"));
+            initials.SetBinding(VisibilityProperty, new Binding("InitialsVisibility"));
+            initials.SetValue(TextBlock.ForegroundProperty, Brushes.White);
+            initials.SetValue(TextBlock.FontWeightProperty, FontWeights.Bold);
+            initials.SetValue(HorizontalAlignmentProperty, HorizontalAlignment.Center);
+            initials.SetValue(VerticalAlignmentProperty, VerticalAlignment.Center);
+            avatar.AppendChild(initials);
+            layers.AppendChild(avatar);
+
+            var overlay = new FrameworkElementFactory(typeof(Border), "playOverlay");
+            overlay.SetValue(Border.CornerRadiusProperty, circle);
+            overlay.SetValue(Border.BackgroundProperty, ModernBrush("#990F172A"));
+            overlay.SetValue(OpacityProperty, 0.0);
+            overlay.SetValue(IsHitTestVisibleProperty, false);
+            var play = new FrameworkElementFactory(typeof(System.Windows.Shapes.Path));
+            play.SetValue(System.Windows.Shapes.Path.DataProperty, Geometry.Parse("M 0,0 L 11,7 L 0,14 Z"));
+            play.SetValue(System.Windows.Shapes.Shape.FillProperty, Brushes.White);
+            play.SetValue(MarginProperty, new Thickness(2, 0, 0, 0));
+            play.SetValue(HorizontalAlignmentProperty, HorizontalAlignment.Center);
+            play.SetValue(VerticalAlignmentProperty, VerticalAlignment.Center);
+            overlay.AppendChild(play);
+            layers.AppendChild(overlay);
+
+            var template = new ControlTemplate(typeof(Button)) { VisualTree = layers };
+            foreach (var property in new[] { IsMouseOverProperty, IsKeyboardFocusedProperty })
+            {
+                var active = new Trigger { Property = property, Value = true };
+                active.Setters.Add(new Setter(OpacityProperty, 1.0, "playOverlay"));
+                active.Setters.Add(new Setter(OpacityProperty, 0.0, "initials"));
+                template.Triggers.Add(active);
+            }
+
+            var button = new FrameworkElementFactory(typeof(Button));
+            button.SetValue(WidthProperty, size);
+            button.SetValue(HeightProperty, size);
+            button.SetValue(VerticalAlignmentProperty, VerticalAlignment.Center);
+            button.SetValue(CursorProperty, System.Windows.Input.Cursors.Hand);
+            button.SetValue(FocusVisualStyleProperty, null);
+            button.SetValue(Button.TemplateProperty, template);
+            button.SetValue(Button.TagProperty, "Mở Zalo");
+            button.SetValue(ToolTipProperty, "Mở hoặc hiện Zalo");
+            button.SetValue(System.Windows.Automation.AutomationProperties.NameProperty, "Mở hoặc hiện Zalo");
+            button.AddHandler(Button.ClickEvent, new RoutedEventHandler(RowAction));
+            return new DataTemplate { VisualTree = button };
+        }
+
         private void AddBadgeColumn(string header, string text, string background, string foreground, double width, double radius)
         {
             var border = new FrameworkElementFactory(typeof(Border)); border.SetBinding(Border.BackgroundProperty, new Binding(background)); border.SetValue(Border.CornerRadiusProperty, new CornerRadius(radius)); border.SetValue(Border.PaddingProperty, new Thickness(8, 4, 8, 4)); border.SetValue(MarginProperty, new Thickness(12, 0, 6, 0)); border.SetValue(HorizontalAlignmentProperty, HorizontalAlignment.Left); border.SetValue(VerticalAlignmentProperty, VerticalAlignment.Center);
