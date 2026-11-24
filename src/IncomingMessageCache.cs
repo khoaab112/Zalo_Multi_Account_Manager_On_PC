@@ -260,6 +260,7 @@ namespace ZaloManagerPoc
             public static void Store(CachedIncomingMessage msg)
             {
                 if (msg == null || String.IsNullOrEmpty(msg.Id)) return;
+                if (!String.IsNullOrEmpty(msg.ProfileId) && !IsRecallEnabled(msg.ProfileId)) return;
                 var copy = new CachedIncomingMessage
                 {
                     Id = msg.Id,

@@ -69,6 +69,138 @@ namespace ZaloManagerPoc
 
         internal static readonly string RecallMediaDir = Path.Combine(Store.Root, "media");
 
+        public sealed class RecallStorageInfo
+        {
+            public long TextBytes;
+            public long MediaBytes;
+            public int TextCount;
+            public int MediaCount;
+            public long TotalBytes { get { return TextBytes + MediaBytes; } }
+
+            public string FormattedTotal { get { return StorageMeasurement.Format(TotalBytes); } }
+            public string FormattedText { get { return StorageMeasurement.Format(TextBytes); } }
+            public string FormattedMedia { get { return StorageMeasurement.Format(MediaBytes); } }
+        }
+
+        private static readonly HashSet<string> DisabledRecallProfiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        private static readonly string RecallSettingsPath = Path.Combine(Store.Root, "recall-disabled.txt");
+        private static bool recallSettingsLoaded;
+
+        private static void EnsureRecallSettingsLoaded()
+        {
+            if (recallSettingsLoaded) return;
+            recallSettingsLoaded = true;
+            try
+            {
+                if (File.Exists(RecallSettingsPath))
+                {
+                    string[] lines = File.ReadAllLines(RecallSettingsPath);
+                    foreach (var line in lines)
+                    {
+                        string trimmed = (line ?? "").Trim();
+                        if (!String.IsNullOrEmpty(trimmed)) DisabledRecallProfiles.Add(trimmed);
+                    }
+                }
+            }
+            catch { }
+        }
+
+        public static bool IsRecallEnabled(string profileId)
+        {
+            lock (RecallGate)
+            {
+                EnsureRecallSettingsLoaded();
+                return !DisabledRecallProfiles.Contains(profileId ?? "");
+            }
+        }
+
+        public static void SetRecallEnabled(string profileId, bool enabled)
+        {
+            lock (RecallGate)
+            {
+                EnsureRecallSettingsLoaded();
+                if (enabled) DisabledRecallProfiles.Remove(profileId ?? "");
+                else DisabledRecallProfiles.Add(profileId ?? "");
+
+                try
+                {
+                    Directory.CreateDirectory(Path.GetDirectoryName(RecallSettingsPath));
+                    File.WriteAllLines(RecallSettingsPath, DisabledRecallProfiles.ToArray());
+                }
+                catch { }
+            }
+            NotifyRecallChanged();
+        }
+
+        public static RecallStorageInfo GetRecallStorageInfo(string profileId)
+        {
+            lock (RecallGate)
+            {
+                EnsureRecallLoaded();
+                var info = new RecallStorageInfo();
+                Dictionary<string, RecallThread> threads;
+                if (!recalled.TryGetValue(profileId, out threads)) return info;
+
+                foreach (var thread in threads.Values)
+                {
+                    foreach (var message in thread.Messages)
+                    {
+                        if (!String.IsNullOrEmpty(message.Content))
+                        {
+                            info.TextBytes += Encoding.UTF8.GetByteCount(message.Content);
+                            info.TextCount++;
+                        }
+                        var attachment = message.Attachment;
+                        if (attachment != null)
+                        {
+                            long m = RecallMediaBytes(attachment.Data) + RecallMediaBytes(attachment.PreviewData);
+                            if (m > 0)
+                            {
+                                info.MediaBytes += m;
+                                info.MediaCount++;
+                            }
+                        }
+                    }
+                }
+                return info;
+            }
+        }
+
+        public static RecallStorageInfo GetRecallConversationStorageInfo(string profileId, string conversationId)
+        {
+            lock (RecallGate)
+            {
+                EnsureRecallLoaded();
+                var info = new RecallStorageInfo();
+                Dictionary<string, RecallThread> threads;
+                if (!recalled.TryGetValue(profileId, out threads)) return info;
+
+                RecallThread target;
+                if (threads.TryGetValue(conversationId, out target) && target != null)
+                {
+                    foreach (var message in target.Messages)
+                    {
+                        if (!String.IsNullOrEmpty(message.Content))
+                        {
+                            info.TextBytes += Encoding.UTF8.GetByteCount(message.Content);
+                            info.TextCount++;
+                        }
+                        var attachment = message.Attachment;
+                        if (attachment != null)
+                        {
+                            long m = RecallMediaBytes(attachment.Data) + RecallMediaBytes(attachment.PreviewData);
+                            if (m > 0)
+                            {
+                                info.MediaBytes += m;
+                                info.MediaCount++;
+                            }
+                        }
+                    }
+                }
+                return info;
+            }
+        }
+
         internal static int RecallRevision
         {
             get { return Volatile.Read(ref recallRevision); }
@@ -307,6 +439,7 @@ namespace ZaloManagerPoc
 
         private static void RecordRecall(Profile profile, string conversationId, string conversationName, string avatarPng, string messageId, string cliMsgId, string content, RecallAttachment attachment, bool outgoing = false)
         {
+            if (profile != null && !IsRecallEnabled(profile.Id)) return;
             if (String.IsNullOrWhiteSpace(messageId) || messageId.StartsWith("bg_") || messageId.StartsWith("conv_")) return;
             lock (RecallGate)
             {

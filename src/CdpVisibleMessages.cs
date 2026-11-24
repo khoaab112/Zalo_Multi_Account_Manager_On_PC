@@ -740,6 +740,7 @@ const title = document.querySelector('#header .header-title');
 
             public void AcceptBindingPayload(Profile profile, string payload, System.Threading.CancellationToken token)
             {
+                if (profile != null && !IsRecallEnabled(profile.Id)) return;
                 ApplyRecallDownloads(profile);
                 if (String.IsNullOrEmpty(payload)) return;
                 try

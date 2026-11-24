@@ -280,6 +280,7 @@ namespace ZaloManagerPoc
                         var parameters = Dict(data, "params");
                         if (parameters != null && Text(parameters, "name") == "__zaloManagerDispatch")
                         {
+                            if (profile != null && !IsRecallEnabled(profile.Id)) continue;
                             string payload = Text(parameters, "payload");
                             ThreadPool.QueueUserWorkItem(delegate
                             {
