@@ -1,0 +1,182 @@
+using System;
+using System.Drawing;
+using System.Reflection;
+using System.Runtime.InteropServices;
+using System.Windows;
+using System.Windows.Forms;
+
+namespace ZaloManagerPoc
+{
+    public static class TrayManager
+    {
+        [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Auto)]
+        public static extern int RegisterWindowMessage(string lpString);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        public static extern bool PostMessage(IntPtr hWnd, int Msg, IntPtr wParam, IntPtr lParam);
+
+        [DllImport("user32.dll")]
+        public static extern bool ShowWindowAsync(IntPtr hWnd, int nCmdShow);
+
+        [DllImport("user32.dll")]
+        public static extern bool SetForegroundWindow(IntPtr hWnd);
+
+        public static readonly int WM_SHOW_MANAGER = RegisterWindowMessage("ZaloManager_ShowMainWindow_V2");
+        public const int HWND_BROADCAST = 0xffff;
+        public const string ShowEventName = "Local\\ZaloManager_ShowEvent";
+
+        private static NotifyIcon notifyIcon;
+        private static Window mainWindow;
+        private static System.Threading.EventWaitHandle showEvent;
+        private static bool listenerStarted;
+
+        public static void Initialize(Window window)
+        {
+            mainWindow = window;
+            StartShowEventListener();
+            if (notifyIcon != null) return;
+
+            notifyIcon = new NotifyIcon();
+            try
+            {
+                using (var stream = Assembly.GetExecutingAssembly().GetManifestResourceStream("ZaloManager.Icon.ico"))
+                {
+                    if (stream != null) notifyIcon.Icon = new Icon(stream);
+                    else notifyIcon.Icon = SystemIcons.Application;
+                }
+            }
+            catch
+            {
+                notifyIcon.Icon = SystemIcons.Application;
+            }
+
+            notifyIcon.Text = "Zalo Manager · Đang theo dõi tin nhắn thu hồi";
+            notifyIcon.Visible = true;
+
+            var contextMenu = new ContextMenuStrip();
+            var openItem = new ToolStripMenuItem("Mở Zalo Manager", null, (s, e) => RestoreMainWindow());
+            openItem.Font = new Font(openItem.Font, System.Drawing.FontStyle.Bold);
+            contextMenu.Items.Add(openItem);
+
+            contextMenu.Items.Add(new ToolStripSeparator());
+
+            var exitItem = new ToolStripMenuItem("Thoát hoàn toàn", null, (s, e) => ExitApplication());
+            contextMenu.Items.Add(exitItem);
+
+            notifyIcon.ContextMenuStrip = contextMenu;
+            notifyIcon.DoubleClick += (s, e) => RestoreMainWindow();
+        }
+
+        public static void StartShowEventListener()
+        {
+            if (listenerStarted) return;
+            listenerStarted = true;
+            try
+            {
+                bool created;
+                showEvent = new System.Threading.EventWaitHandle(false, System.Threading.EventResetMode.AutoReset, ShowEventName, out created);
+                var thread = new System.Threading.Thread(() =>
+                {
+                    while (true)
+                    {
+                        try
+                        {
+                            showEvent.WaitOne();
+                            var app = System.Windows.Application.Current;
+                            if (app != null && app.Dispatcher != null)
+                            {
+                                app.Dispatcher.BeginInvoke(new Action(() =>
+                                {
+                                    RestoreMainWindow();
+                                }));
+                            }
+                        }
+                        catch (System.Threading.ThreadAbortException) { break; }
+                        catch { }
+                    }
+                }) { IsBackground = true };
+                thread.Start();
+            }
+            catch { }
+        }
+
+        public static void SignalShowManager()
+        {
+            try
+            {
+                using (var ev = System.Threading.EventWaitHandle.OpenExisting(ShowEventName))
+                {
+                    ev.Set();
+                }
+            }
+            catch { }
+            try
+            {
+                PostMessage((IntPtr)HWND_BROADCAST, WM_SHOW_MANAGER, IntPtr.Zero, IntPtr.Zero);
+            }
+            catch { }
+        }
+
+        public static void ShowBalloon(string title, string message, ToolTipIcon icon = ToolTipIcon.Info)
+        {
+            if (notifyIcon != null && notifyIcon.Visible)
+            {
+                notifyIcon.ShowBalloonTip(3000, title, message, icon);
+            }
+        }
+
+        public static void HideToTray()
+        {
+            if (mainWindow != null)
+            {
+                var mgr = mainWindow as ManagerWindow;
+                if (mgr != null)
+                {
+                    foreach (var rw in System.Linq.Enumerable.ToList(mgr.openRecallWindows.Values))
+                    {
+                        if (rw != null && rw.IsLoaded) rw.Hide();
+                    }
+                }
+                mainWindow.WindowState = WindowState.Minimized;
+                mainWindow.ShowInTaskbar = false;
+                mainWindow.Hide();
+            }
+        }
+
+        public static void RestoreMainWindow()
+        {
+            if (mainWindow != null)
+            {
+                mainWindow.Show();
+                mainWindow.ShowInTaskbar = true;
+                if (mainWindow.WindowState == WindowState.Minimized)
+                    mainWindow.WindowState = WindowState.Normal;
+                mainWindow.Activate();
+                mainWindow.Focus();
+
+                var helper = new System.Windows.Interop.WindowInteropHelper(mainWindow);
+                if (helper.Handle != IntPtr.Zero)
+                {
+                    ShowWindowAsync(helper.Handle, 9);
+                    SetForegroundWindow(helper.Handle);
+                }
+
+                var mgr = mainWindow as ManagerWindow;
+                if (mgr != null) mgr.RestoreOpenRecallWindows();
+            }
+        }
+
+        public static void ExitApplication()
+        {
+            if (notifyIcon != null)
+            {
+                notifyIcon.Visible = false;
+                notifyIcon.Dispose();
+                notifyIcon = null;
+            }
+            CdpMessageWatcher.StopAll();
+            System.Windows.Application.Current.Shutdown();
+            Environment.Exit(0);
+        }
+    }
+}

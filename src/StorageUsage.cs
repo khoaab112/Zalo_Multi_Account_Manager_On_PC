@@ -130,7 +130,7 @@ namespace ZaloManagerPoc
                         measurement.Key.MeasuredStorage = measurement.Value;
                         storageChecked[measurement.Key] = DateTime.UtcNow;
                     }
-                    grid.Items.Refresh();
+                    try { grid.Items.Refresh(); } catch (Exception ex) { Store.Log(ex); }
                     RefreshProfileStorageTotal();
                 })).Task.ConfigureAwait(false);
             }

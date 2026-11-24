@@ -6,6 +6,7 @@ using System.Runtime.Serialization;
 using System.Runtime.Serialization.Json;
 using System.Security.Cryptography;
 using System.Text;
+using System.Threading;
 
 namespace ZaloManagerPoc
 {
@@ -15,10 +16,12 @@ namespace ZaloManagerPoc
         public sealed class RecalledMessage
         {
             [DataMember] internal string Id;
+            [DataMember(EmitDefaultValue = false)] internal string CliMsgId;
             [DataMember] public DateTimeOffset DetectedAt { get; internal set; }
             [DataMember] public string Content { get; internal set; }
             [DataMember] internal bool Unread = true;
             [DataMember(EmitDefaultValue = false)] internal RecallAttachment Attachment;
+            [DataMember(EmitDefaultValue = false)] public bool Outgoing { get; internal set; }
         }
 
         [DataContract]
@@ -33,6 +36,10 @@ namespace ZaloManagerPoc
             [DataMember(EmitDefaultValue = false)] internal string FileName { get; set; }
             [DataMember(EmitDefaultValue = false)] internal string PreviewData;
             [DataMember(EmitDefaultValue = false)] internal string PreviewMime;
+            [DataMember(EmitDefaultValue = false)] internal string SourceUrl;
+            [DataMember(EmitDefaultValue = false)] internal string FileSize;
+            [DataMember(EmitDefaultValue = false)] internal string Checksum;
+            [DataMember(EmitDefaultValue = false)] internal bool Original;
         }
 
         internal sealed class RecallConversation
@@ -60,9 +67,11 @@ namespace ZaloManagerPoc
         private static int recallRevision;
         public static event Action RecalledMessagesChanged;
 
+        internal static readonly string RecallMediaDir = Path.Combine(Store.Root, "media");
+
         internal static int RecallRevision
         {
-            get { lock (RecallGate) return recallRevision; }
+            get { return Volatile.Read(ref recallRevision); }
         }
 
         internal static string RecallStorageError
@@ -107,6 +116,16 @@ namespace ZaloManagerPoc
         internal static long RecallMediaBytes(string data)
         {
             if (String.IsNullOrEmpty(data)) return 0;
+            if (data.StartsWith("local:", StringComparison.OrdinalIgnoreCase))
+            {
+                try
+                {
+                    string localPath = data.Substring("local:".Length);
+                    if (File.Exists(localPath)) return new FileInfo(localPath).Length;
+                }
+                catch { }
+                return 0;
+            }
             int padding = data.EndsWith("==", StringComparison.Ordinal) ? 2 : data.EndsWith("=", StringComparison.Ordinal) ? 1 : 0;
             return data.Length / 4L * 3 - padding;
         }
@@ -118,50 +137,119 @@ namespace ZaloManagerPoc
                 EnsureRecallLoaded();
                 Dictionary<string, RecallThread> threads;
                 if (!recalled.TryGetValue(profileId, out threads)) return new RecallConversation[0];
-                return threads.Where(pair => pair.Value.Messages.Count > 0).Select(pair => new RecallConversation
+
+                var grouped = new Dictionary<string, RecallConversation>();
+                foreach (var pair in threads.Where(p => p.Value.Messages.Count > 0))
                 {
-                    Id = pair.Key,
-                    Name = pair.Value.Name,
-                    AvatarPng = pair.Value.AvatarPng,
-                    Unread = pair.Value.Messages.Count(message => message.Unread),
-                    Latest = pair.Value.Messages[pair.Value.Messages.Count - 1].DetectedAt
-                }).OrderByDescending(item => item.Latest).ToArray();
+                    string name = String.IsNullOrWhiteSpace(pair.Value.Name) ? "Người gửi chưa xác định" : pair.Value.Name;
+                    string key = name != "Người gửi chưa xác định" ? "name:" + name : pair.Key;
+
+                    RecallConversation conv;
+                    if (grouped.TryGetValue(key, out conv))
+                    {
+                        conv.Unread += pair.Value.Messages.Count(m => m.Unread);
+                        var latestMsg = pair.Value.Messages[pair.Value.Messages.Count - 1].DetectedAt;
+                        if (latestMsg > conv.Latest) conv.Latest = latestMsg;
+                        if (String.IsNullOrEmpty(conv.AvatarPng) && !String.IsNullOrEmpty(pair.Value.AvatarPng))
+                            conv.AvatarPng = pair.Value.AvatarPng;
+                    }
+                    else
+                    {
+                        grouped[key] = new RecallConversation
+                        {
+                            Id = pair.Key,
+                            Name = name,
+                            AvatarPng = pair.Value.AvatarPng,
+                            Unread = pair.Value.Messages.Count(m => m.Unread),
+                            Latest = pair.Value.Messages[pair.Value.Messages.Count - 1].DetectedAt
+                        };
+                    }
+                }
+                return grouped.Values.OrderByDescending(item => item.Latest).ToArray();
             }
         }
 
         internal static RecalledMessage[] ReadRecallConversation(string profileId, string conversationId)
         {
             RecalledMessage[] messages;
-            bool changed;
+            bool changed = false;
             lock (RecallGate)
             {
-                var thread = FindRecallThread(profileId, conversationId);
-                if (thread == null) return new RecalledMessage[0];
-                messages = thread.Messages.ToArray();
-                changed = messages.Any(message => message.Unread);
+                EnsureRecallLoaded();
+                Dictionary<string, RecallThread> threads;
+                if (!recalled.TryGetValue(profileId, out threads)) return new RecalledMessage[0];
+
+                RecallThread primaryThread;
+                threads.TryGetValue(conversationId, out primaryThread);
+                string name = primaryThread != null ? primaryThread.Name : null;
+
+                var allMatchingThreads = threads.Values.Where(t => t == primaryThread || (!String.IsNullOrWhiteSpace(name) && name != "Người gửi chưa xác định" && t.Name == name)).ToList();
+
+                var messageList = new List<RecalledMessage>();
+                foreach (var t in allMatchingThreads)
+                {
+                    foreach (var m in t.Messages)
+                    {
+                        if (!messageList.Any(existing => existing.Id == m.Id))
+                        {
+                            messageList.Add(m);
+                            if (m.Unread)
+                            {
+                                m.Unread = false;
+                                changed = true;
+                            }
+                        }
+                    }
+                }
                 if (changed)
                 {
-                    foreach (var message in messages) message.Unread = false;
                     SaveRecallArchive();
                     recallRevision++;
                 }
+                messages = messageList.OrderBy(m => m.DetectedAt).ToArray();
             }
             if (changed) NotifyRecallChanged();
             return messages;
         }
 
+        private static void TryDeleteLocalMedia(string data)
+        {
+            if (String.IsNullOrEmpty(data) || !data.StartsWith("local:", StringComparison.OrdinalIgnoreCase)) return;
+            try
+            {
+                string localPath = data.Substring("local:".Length);
+                if (localPath.StartsWith(RecallMediaDir, StringComparison.OrdinalIgnoreCase) && File.Exists(localPath))
+                {
+                    File.Delete(localPath);
+                }
+            }
+            catch { }
+        }
+
         internal static bool DeleteAllRecalls(string profileId)
         {
             bool saved;
+            var attachmentsToClean = new List<RecallAttachment>();
             lock (RecallGate)
             {
                 EnsureRecallLoaded();
                 Dictionary<string, RecallThread> threads;
                 if (!recalled.TryGetValue(profileId, out threads)) return true;
+                foreach (var t in threads.Values)
+                foreach (var m in t.Messages)
+                    if (m.Attachment != null) attachmentsToClean.Add(m.Attachment);
                 recalled.Remove(profileId);
                 saved = SaveRecallArchive();
                 if (!saved) recalled.Add(profileId, threads);
                 recallRevision++;
+            }
+            if (saved)
+            {
+                foreach (var att in attachmentsToClean)
+                {
+                    TryDeleteLocalMedia(att.Data);
+                    TryDeleteLocalMedia(att.PreviewData);
+                }
             }
             NotifyRecallChanged();
             return saved;
@@ -170,15 +258,39 @@ namespace ZaloManagerPoc
         internal static bool DeleteRecallConversation(string profileId, string conversationId)
         {
             bool saved;
+            var attachmentsToClean = new List<RecallAttachment>();
             lock (RecallGate)
             {
-                var thread = FindRecallThread(profileId, conversationId);
-                if (thread == null) return true;
-                var threads = recalled[profileId];
-                threads.Remove(conversationId);
+                EnsureRecallLoaded();
+                Dictionary<string, RecallThread> threads;
+                if (!recalled.TryGetValue(profileId, out threads)) return true;
+
+                RecallThread targetThread;
+                threads.TryGetValue(conversationId, out targetThread);
+                string name = targetThread != null ? targetThread.Name : null;
+
+                var keysToRemove = threads.Where(pair => pair.Key == conversationId || (!String.IsNullOrWhiteSpace(name) && name != "Người gửi chưa xác định" && pair.Value.Name == name)).Select(pair => pair.Key).ToList();
+                foreach (var k in keysToRemove)
+                {
+                    RecallThread remThread;
+                    if (threads.TryGetValue(k, out remThread))
+                    {
+                        foreach (var m in remThread.Messages)
+                            if (m.Attachment != null) attachmentsToClean.Add(m.Attachment);
+                    }
+                    threads.Remove(k);
+                }
+
                 saved = SaveRecallArchive();
-                if (!saved) threads.Add(conversationId, thread);
                 recallRevision++;
+            }
+            if (saved)
+            {
+                foreach (var att in attachmentsToClean)
+                {
+                    TryDeleteLocalMedia(att.Data);
+                    TryDeleteLocalMedia(att.PreviewData);
+                }
             }
             NotifyRecallChanged();
             return saved;
@@ -193,8 +305,9 @@ namespace ZaloManagerPoc
                 ? thread : null;
         }
 
-        private static void RecordRecall(Profile profile, string conversationId, string conversationName, string avatarPng, string messageId, string content, RecallAttachment attachment)
+        private static void RecordRecall(Profile profile, string conversationId, string conversationName, string avatarPng, string messageId, string cliMsgId, string content, RecallAttachment attachment, bool outgoing = false)
         {
+            if (String.IsNullOrWhiteSpace(messageId) || messageId.StartsWith("bg_") || messageId.StartsWith("conv_")) return;
             lock (RecallGate)
             {
                 EnsureRecallLoaded();
@@ -204,16 +317,69 @@ namespace ZaloManagerPoc
                     threads = new Dictionary<string, RecallThread>();
                     recalled.Add(profile.Id, threads);
                 }
+                foreach (var existingThread in threads.Values)
+                {
+                    if (existingThread.Messages.Any(message =>
+                        message.Id == messageId
+                        || (!String.IsNullOrEmpty(cliMsgId) && (message.Id == cliMsgId || message.CliMsgId == cliMsgId))
+                        || (!String.IsNullOrEmpty(message.CliMsgId) && message.CliMsgId == messageId)))
+                        return;
+                }
+                RecallThread thread = null;
+                if (!String.IsNullOrWhiteSpace(conversationName) && conversationName != "Người gửi chưa xác định")
+                {
+                    thread = threads.Values.FirstOrDefault(t => t.Name == conversationName);
+                }
+                if (thread == null && !String.IsNullOrWhiteSpace(conversationId))
+                {
+                    threads.TryGetValue(conversationId, out thread);
+                }
+                if (thread == null)
+                {
+                    thread = new RecallThread();
+                    string key = !String.IsNullOrWhiteSpace(conversationId) ? conversationId : ("conversation:" + messageId);
+                    threads.Add(key, thread);
+                }
+                if (!String.IsNullOrWhiteSpace(conversationName) && conversationName != "Người gửi chưa xác định")
+                    thread.Name = conversationName;
+                if (!String.IsNullOrEmpty(avatarPng) && String.IsNullOrEmpty(thread.AvatarPng)) thread.AvatarPng = avatarPng;
+                thread.Messages.Add(new RecalledMessage { Id = messageId, CliMsgId = cliMsgId, DetectedAt = DateTimeOffset.Now, Content = content, Attachment = attachment, Outgoing = outgoing });
+                SaveRecallArchive();
+                recallRevision++;
+            }
+            NotifyRecallChanged();
+        }
+
+        private static bool UpdateRecallAttachmentCore(string profileId, string conversationId, string messageId, RecallAttachment attachment)
+        {
+            lock (RecallGate)
+            {
+                EnsureRecallLoaded();
+                Dictionary<string, RecallThread> threads;
+                if (!recalled.TryGetValue(profileId, out threads)) return false;
+
                 RecallThread thread;
                 if (!threads.TryGetValue(conversationId, out thread))
                 {
-                    thread = new RecallThread();
-                    threads.Add(conversationId, thread);
+                    thread = threads.Values.FirstOrDefault(t => t.Messages.Any(m => m.Id == messageId || (!String.IsNullOrEmpty(m.CliMsgId) && m.CliMsgId == messageId)));
                 }
-                if (thread.Messages.Any(message => message.Id == messageId)) return;
-                thread.Name = conversationName;
-                if (!String.IsNullOrEmpty(avatarPng)) thread.AvatarPng = avatarPng;
-                thread.Messages.Add(new RecalledMessage { Id = messageId, DetectedAt = DateTimeOffset.Now, Content = content, Attachment = attachment });
+                if (thread == null) return false;
+                int index = thread.Messages.FindIndex(m => m.Id == messageId || (!String.IsNullOrEmpty(m.CliMsgId) && m.CliMsgId == messageId));
+                if (index < 0) return false;
+                var messageToUpdate = thread.Messages[index];
+                thread.Messages[index] = new RecalledMessage
+                {
+                    Id = messageToUpdate.Id, CliMsgId = messageToUpdate.CliMsgId, Content = messageToUpdate.Content, DetectedAt = messageToUpdate.DetectedAt,
+                    Unread = messageToUpdate.Unread, Attachment = attachment, Outgoing = messageToUpdate.Outgoing
+                };
+                return true;
+            }
+        }
+
+        private static void CommitRecallChanges()
+        {
+            lock (RecallGate)
+            {
                 SaveRecallArchive();
                 recallRevision++;
             }
@@ -222,22 +388,10 @@ namespace ZaloManagerPoc
 
         private static void UpdateRecallAttachment(string profileId, string conversationId, string messageId, RecallAttachment attachment)
         {
-            lock (RecallGate)
+            if (UpdateRecallAttachmentCore(profileId, conversationId, messageId, attachment))
             {
-                var thread = FindRecallThread(profileId, conversationId);
-                if (thread == null) return;
-                int index = thread.Messages.FindIndex(message => message.Id == messageId);
-                if (index < 0) return;
-                var messageToUpdate = thread.Messages[index];
-                thread.Messages[index] = new RecalledMessage
-                {
-                    Id = messageToUpdate.Id, Content = messageToUpdate.Content, DetectedAt = messageToUpdate.DetectedAt,
-                    Unread = messageToUpdate.Unread, Attachment = attachment
-                };
-                SaveRecallArchive();
-                recallRevision++;
+                CommitRecallChanges();
             }
-            NotifyRecallChanged();
         }
 
         private static void EnsureRecallLoaded()
@@ -255,6 +409,10 @@ namespace ZaloManagerPoc
                     using (var stream = new MemoryStream(plain, false))
                         recalled = (Dictionary<string, Dictionary<string, RecallThread>>)CreateRecallSerializer().ReadObject(stream);
                     if (recalled == null) throw new SerializationException();
+                    if (!RecallArchivePath.EndsWith("archive.dat", StringComparison.OrdinalIgnoreCase) && !RecallArchivePath.Contains("fixture"))
+                    {
+                        MigrateLargeMediaToDisk();
+                    }
                     return;
                 }
             }
@@ -265,6 +423,62 @@ namespace ZaloManagerPoc
                 recallStorageError = "Không đọc được kho tin thu hồi. File đã lưu được giữ nguyên.";
             }
             recalled = new Dictionary<string, Dictionary<string, RecallThread>>();
+        }
+
+        private static void MigrateLargeMediaToDisk()
+        {
+            if (recalled == null) return;
+            bool modified = false;
+            try
+            {
+                Directory.CreateDirectory(RecallMediaDir);
+                foreach (var profileThreads in recalled.Values)
+                {
+                    foreach (var thread in profileThreads.Values)
+                    {
+                        foreach (var message in thread.Messages)
+                        {
+                            var att = message.Attachment;
+                            if (att == null) continue;
+
+                            if (!String.IsNullOrEmpty(att.Data) && !att.Data.StartsWith("local:", StringComparison.OrdinalIgnoreCase)
+                                && (att.Data.Length > 20000 || att.Kind == "video" || att.Kind == "audio" || att.Kind == "file"))
+                            {
+                                try
+                                {
+                                    byte[] bytes = Convert.FromBase64String(att.Data);
+                                    string ext = ".bin";
+                                    if (att.Kind == "video") ext = ".mp4";
+                                    else if (att.Kind == "audio") ext = (att.Mime ?? "").Contains("wav") ? ".wav" : ".m4a";
+                                    else if (att.Kind == "image") ext = (att.Mime ?? "").Contains("png") ? ".png" : ".jpg";
+                                    else if (att.Kind == "file" && !String.IsNullOrEmpty(message.Content))
+                                    {
+                                        string e = Path.GetExtension(message.Content);
+                                        if (!String.IsNullOrEmpty(e) && e.Length <= 8) ext = e;
+                                    }
+                                    string filePath = Path.Combine(RecallMediaDir, Guid.NewGuid().ToString("N") + ext);
+                                    File.WriteAllBytes(filePath, bytes);
+                                    att.Data = "local:" + filePath;
+                                    modified = true;
+                                }
+                                catch { }
+                            }
+
+                            if (!String.IsNullOrEmpty(att.PreviewData) && !att.PreviewData.StartsWith("local:", StringComparison.OrdinalIgnoreCase) && att.PreviewData.Length > 20000)
+                            {
+                                att.PreviewData = null;
+                                att.PreviewMime = null;
+                                modified = true;
+                            }
+                        }
+                    }
+                }
+            }
+            catch { }
+            if (modified)
+            {
+                SaveRecallArchive();
+            }
         }
 
         private static bool SaveRecallArchive()

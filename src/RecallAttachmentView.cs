@@ -13,12 +13,14 @@ namespace ZaloManagerPoc
         private Border RecallAttachmentBubble(CdpMessageWatcher.RecalledMessage message, Window owner)
         {
             var attachment = message.Attachment;
+            if (attachment.Kind == "contact") return RecallContactBubble(message, owner);
             bool picture = attachment.Kind == "image" || attachment.Kind == "sticker";
             var image = picture ? DecodeRecallMediaImage(attachment) : null;
             if (image != null) return RecallPictureBubble(message, owner, image);
 
             bool audio = attachment.Kind == "audio";
             bool video = IsRecallVideo(message);
+            if (video) return RecallVideoBubble(message, owner);
             bool saved = !String.IsNullOrEmpty(attachment.Data);
             string fileName = RecallAttachmentName(message);
             string title = audio ? "Tin nhắn thoại" : picture ? (attachment.Kind == "sticker" ? "Sticker" : "Ảnh") : fileName;
@@ -49,6 +51,8 @@ namespace ZaloManagerPoc
                     delegate { if (readable) ShowRecallText(message, owner); else PlayRecallVideo(message, owner); }, video);
                 if (video) button.Opacity = 0.92;
                 tile.Child = button;
+                tile.Cursor = System.Windows.Input.Cursors.Hand;
+                tile.MouseLeftButtonUp += delegate { if (readable) ShowRecallText(message, owner); else PlayRecallVideo(message, owner); };
             }
             else if (!audio || !saved)
                 tile.Child = RecallIcon(audio || video ? playIcon : fileIcon, ModernBrush(video ? "#FFFFFF" : "#1265CB"), audio || video);
@@ -59,11 +63,19 @@ namespace ZaloManagerPoc
             if (audio && saved) AddRecallAudioPlayer(tile, details, message);
             else
             {
-                details.Children.Add(new TextBlock { Text = title, ToolTip = title, TextTrimming = TextTrimming.CharacterEllipsis,
-                    FontWeight = FontWeights.SemiBold, FontSize = 14, Foreground = ModernBrush("#111827") });
-                string description = saved ? RecallMediaSize(attachment.Data) + " · Đã lưu" : RecallCaptureStatus(attachment.CaptureStatus);
+                var titleBlock = new TextBlock { Text = title, ToolTip = title, TextTrimming = TextTrimming.CharacterEllipsis,
+                    FontWeight = FontWeights.SemiBold, FontSize = 14, Foreground = ModernBrush("#111827") };
+                if (saved && (video || readable))
+                {
+                    titleBlock.Cursor = System.Windows.Input.Cursors.Hand;
+                    titleBlock.MouseLeftButtonUp += delegate { if (readable) ShowRecallText(message, owner); else PlayRecallVideo(message, owner); };
+                }
+                details.Children.Add(titleBlock);
+                string description = saved ? RecallMediaSize(attachment.Data) + " · Đã lưu" : "Hệ thống không tải kịp";
                 details.Children.Add(new TextBlock { Text = description, TextWrapping = TextWrapping.Wrap, FontSize = 12,
-                    Foreground = ModernBrush("#64748B"), Margin = new Thickness(0, 4, 0, 0) });
+                    Foreground = saved ? ModernBrush("#64748B") : ModernBrush("#DC2626"),
+                    FontStyle = saved ? FontStyles.Normal : FontStyles.Italic,
+                    Margin = new Thickness(0, 4, 0, 0) });
             }
 
             var actions = new StackPanel { VerticalAlignment = VerticalAlignment.Center, HorizontalAlignment = HorizontalAlignment.Center };
@@ -82,6 +94,124 @@ namespace ZaloManagerPoc
                 bubble.HorizontalAlignment = HorizontalAlignment.Left;
             }
             return bubble;
+        }
+
+        private Border RecallVideoBubble(CdpMessageWatcher.RecalledMessage message, Window owner)
+        {
+            var attachment = message.Attachment;
+            bool saved = !String.IsNullOrEmpty(attachment.Data);
+            string fileName = RecallAttachmentName(message);
+            BitmapSource thumbnail = !String.IsNullOrEmpty(attachment.PreviewData) ? DecodeRecallImageBytes(attachment.PreviewData) : null;
+
+            var stage = new Grid { Width = 260, Height = 170, HorizontalAlignment = HorizontalAlignment.Left };
+            var videoSurface = new Border
+            {
+                CornerRadius = new CornerRadius(14),
+                BorderThickness = new Thickness(1),
+                BorderBrush = ModernBrush("#334155"),
+                Background = thumbnail != null ? (Brush)new ImageBrush(thumbnail) { Stretch = Stretch.UniformToFill } : ModernBrush("#1E293B")
+            };
+            stage.Children.Add(videoSurface);
+
+            string playIcon = "M 4,2 L 14,8 L 4,14 Z";
+            if (saved)
+            {
+                var playButton = RecallIconButton("Xem video", playIcon, "#CC0F172A", "#FFFFFF", 50,
+                    delegate { PlayRecallVideo(message, owner); }, true);
+                playButton.BorderBrush = ModernBrush("#64748B");
+                playButton.BorderThickness = new Thickness(1.5);
+                playButton.HorizontalAlignment = HorizontalAlignment.Center;
+                playButton.VerticalAlignment = VerticalAlignment.Center;
+                stage.Children.Add(playButton);
+
+                stage.Cursor = System.Windows.Input.Cursors.Hand;
+                stage.MouseLeftButtonUp += delegate(object sender, System.Windows.Input.MouseButtonEventArgs args)
+                {
+                    if (!args.Handled) PlayRecallVideo(message, owner);
+                };
+
+                string sizeLabel = RecallMediaSize(attachment.Data);
+                var badge = new Border
+                {
+                    Background = ModernBrush("#CC0F172A"),
+                    CornerRadius = new CornerRadius(5),
+                    Padding = new Thickness(6, 2, 6, 2),
+                    Margin = new Thickness(10),
+                    HorizontalAlignment = HorizontalAlignment.Left,
+                    VerticalAlignment = VerticalAlignment.Bottom,
+                    IsHitTestVisible = false,
+                    Child = new TextBlock
+                    {
+                        Text = "▶ " + sizeLabel,
+                        Foreground = Brushes.White,
+                        FontSize = 11,
+                        FontWeight = FontWeights.SemiBold
+                    }
+                };
+                stage.Children.Add(badge);
+
+                var download = RecallDownloadButton(message, owner);
+                download.HorizontalAlignment = HorizontalAlignment.Right;
+                download.VerticalAlignment = VerticalAlignment.Bottom;
+                download.Margin = new Thickness(8);
+                stage.Children.Add(download);
+            }
+            else
+            {
+                var fallback = new Border
+                {
+                    Background = ModernBrush("#CC0F172A"),
+                    CornerRadius = new CornerRadius(8),
+                    Padding = new Thickness(12, 6, 12, 6),
+                    HorizontalAlignment = HorizontalAlignment.Center,
+                    VerticalAlignment = VerticalAlignment.Center,
+                    Child = new TextBlock
+                    {
+                        Text = "Hệ thống không tải kịp",
+                        Foreground = ModernBrush("#F87171"),
+                        FontStyle = FontStyles.Italic,
+                        FontSize = 12
+                    }
+                };
+                stage.Children.Add(fallback);
+            }
+
+            var body = new StackPanel { HorizontalAlignment = HorizontalAlignment.Left };
+            body.Children.Add(stage);
+
+            if (!String.IsNullOrWhiteSpace(fileName) && fileName != "video.mp4" && fileName != "Video")
+            {
+                var titleText = new TextBlock
+                {
+                    Text = fileName,
+                    ToolTip = fileName,
+                    TextTrimming = TextTrimming.CharacterEllipsis,
+                    MaxWidth = 250,
+                    FontSize = 12,
+                    Foreground = ModernBrush("#334155"),
+                    Margin = new Thickness(4, 4, 0, 0)
+                };
+                if (saved)
+                {
+                    titleText.Cursor = System.Windows.Input.Cursors.Hand;
+                    titleText.MouseLeftButtonUp += delegate { PlayRecallVideo(message, owner); };
+                }
+                body.Children.Add(titleText);
+            }
+
+            var time = RecallTimestamp(message);
+            time.Margin = new Thickness(9, 0, 9, 0);
+            body.Children.Add(new Border
+            {
+                Child = time,
+                Background = ModernBrush("#D6DEE8"),
+                CornerRadius = new CornerRadius(10),
+                Padding = new Thickness(0, 3, 0, 3),
+                Margin = new Thickness(0, 5, 0, 0),
+                HorizontalAlignment = HorizontalAlignment.Left
+            });
+
+            return new Border { Child = body, Margin = new Thickness(0, 0, 0, 14) };
         }
 
         private Border RecallPictureBubble(CdpMessageWatcher.RecalledMessage message, Window owner, BitmapSource image)
@@ -130,6 +260,73 @@ namespace ZaloManagerPoc
             return new Border { Child = body, Margin = new Thickness(0, 0, 0, 14) };
         }
 
+        private Border RecallContactBubble(CdpMessageWatcher.RecalledMessage message, Window owner)
+        {
+            var attachment = message.Attachment;
+            string title = message.Content.StartsWith("Danh thiếp: ") ? message.Content.Substring(12) : message.Content;
+            if (String.IsNullOrWhiteSpace(title)) title = "Danh thiếp";
+
+            var card = new Grid { MinWidth = 240, MaxWidth = 320 };
+            card.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+            card.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+
+            var infoRow = new Grid { Margin = new Thickness(0, 0, 0, 8) };
+            infoRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            infoRow.ColumnDefinitions.Add(new ColumnDefinition());
+
+            var avatarCircle = new Border
+            {
+                Width = 46, Height = 46, CornerRadius = new CornerRadius(23),
+                Background = ModernBrush("#DBEAFE"), Margin = new Thickness(0, 0, 12, 0),
+                ClipToBounds = true
+            };
+            BitmapSource avatarImg = DecodeRecallMediaImage(attachment);
+            if (avatarImg != null)
+            {
+                avatarCircle.Child = new Image { Source = avatarImg, Stretch = Stretch.UniformToFill };
+            }
+            else
+            {
+                avatarCircle.Child = new TextBlock
+                {
+                    Text = "👤", FontSize = 22, HorizontalAlignment = HorizontalAlignment.Center,
+                    VerticalAlignment = VerticalAlignment.Center
+                };
+            }
+            infoRow.Children.Add(avatarCircle);
+
+            var textStack = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
+            textStack.Children.Add(new TextBlock
+            {
+                Text = title, FontWeight = FontWeights.Bold, FontSize = 15,
+                Foreground = ModernBrush("#0F172A"), TextTrimming = TextTrimming.CharacterEllipsis
+            });
+            textStack.Children.Add(new TextBlock
+            {
+                Text = "Danh thiếp Zalo", FontSize = 12, Foreground = ModernBrush("#0284C7"),
+                Margin = new Thickness(0, 2, 0, 0)
+            });
+            Grid.SetColumn(textStack, 1);
+            infoRow.Children.Add(textStack);
+            card.Children.Add(infoRow);
+
+            var footer = new DockPanel { Margin = new Thickness(0, 6, 0, 0) };
+            var badge = new Border
+            {
+                Background = ModernBrush("#F1F5F9"), CornerRadius = new CornerRadius(6),
+                Padding = new Thickness(6, 2, 6, 2),
+                Child = new TextBlock { Text = "📇 Danh thiếp", FontSize = 11, Foreground = ModernBrush("#475569") }
+            };
+            footer.Children.Add(badge);
+            var time = RecallTimestamp(message);
+            DockPanel.SetDock(time, Dock.Right);
+            footer.Children.Add(time);
+            Grid.SetRow(footer, 1);
+            card.Children.Add(footer);
+
+            return RecallWhiteBubble(card, new Thickness(14, 12, 14, 10));
+        }
+
         private static Border RecallWhiteBubble(UIElement body, Thickness padding)
         {
             return new Border { Child = body, Margin = new Thickness(0, 0, 0, 14), Padding = padding,
@@ -139,8 +336,41 @@ namespace ZaloManagerPoc
 
         private static TextBox RecallMessageText(string text)
         {
-            return new TextBox { Text = text, IsReadOnly = true, BorderThickness = new Thickness(0), Padding = new Thickness(0),
-                Background = Brushes.Transparent, TextWrapping = TextWrapping.Wrap, FontSize = 14 };
+            return new TextBox { Text = FormatZaloEmoticons(text), IsReadOnly = true, BorderThickness = new Thickness(0), Padding = new Thickness(0),
+                Background = Brushes.Transparent, TextWrapping = TextWrapping.Wrap, FontSize = 14,
+                FontFamily = new FontFamily("Segoe UI Emoji, Segoe UI, Arial") };
+        }
+
+        private static string FormatZaloEmoticons(string text)
+        {
+            if (String.IsNullOrEmpty(text)) return text;
+            return text
+                .Replace("8*)", "😎")
+                .Replace(";-x", "🤐")
+                .Replace(";-X", "🤐")
+                .Replace(":;", "😅")
+                .Replace("/-strong", "💪")
+                .Replace("/-heart", "❤️")
+                .Replace("/-break", "💔")
+                .Replace("/-rose", "🌹")
+                .Replace("/-fade", "🥀")
+                .Replace("/-li", "👍")
+                .Replace("/-share", "📢")
+                .Replace("/-thanks", "🙏")
+                .Replace(":>", "😏")
+                .Replace(":o", "😮")
+                .Replace(":O", "😮")
+                .Replace(":-(", "😢")
+                .Replace(":-((", "😭")
+                .Replace(":-h", "👋")
+                .Replace(":-H", "👋")
+                .Replace(":-*", "😘")
+                .Replace(":-d", "😀")
+                .Replace(":-D", "😀")
+                .Replace(":-p", "😛")
+                .Replace(":-P", "😛")
+                .Replace(";)", "😉")
+                .Replace(":-)", "🙂");
         }
 
         private static TextBlock RecallTimestamp(CdpMessageWatcher.RecalledMessage message)
@@ -390,17 +620,42 @@ namespace ZaloManagerPoc
             return DecodeRecallImageBytes(attachment.Data) ?? DecodeRecallImageBytes(attachment.PreviewData);
         }
 
+        private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, BitmapSource> ImageCache =
+            new System.Collections.Concurrent.ConcurrentDictionary<string, BitmapSource>();
+
         private static BitmapSource DecodeRecallImageBytes(string data)
         {
             if (String.IsNullOrEmpty(data)) return null;
             try
             {
+                BitmapSource cached;
+                if (ImageCache.TryGetValue(data, out cached)) return cached;
+
+                if (data.StartsWith("local:", StringComparison.OrdinalIgnoreCase))
+                {
+                    string localPath = data.Substring("local:".Length);
+                    if (File.Exists(localPath))
+                    {
+                        var bmp = new BitmapImage();
+                        bmp.BeginInit();
+                        bmp.CacheOption = BitmapCacheOption.OnLoad;
+                        bmp.UriSource = new Uri(localPath, UriKind.Absolute);
+                        bmp.EndInit();
+                        bmp.Freeze();
+                        if (ImageCache.Count > 200) ImageCache.Clear();
+                        ImageCache[data] = bmp;
+                        return bmp;
+                    }
+                    return null;
+                }
                 using (var stream = new MemoryStream(Convert.FromBase64String(data), false))
                 {
                     var frame = BitmapDecoder.Create(stream, BitmapCreateOptions.DelayCreation, BitmapCacheOption.OnDemand).Frames[0];
                     if ((long)frame.PixelWidth * frame.PixelHeight > 40000000) return null;
                     var pixels = new WriteableBitmap(frame);
                     pixels.Freeze();
+                    if (ImageCache.Count > 200) ImageCache.Clear();
+                    ImageCache[data] = pixels;
                     return pixels;
                 }
             }
@@ -413,11 +668,22 @@ namespace ZaloManagerPoc
         {
             var dialog = new Microsoft.Win32.SaveFileDialog { FileName = RecallAttachmentName(message), Filter = "Tất cả tệp|*.*" };
             if (dialog.ShowDialog(owner) != true) return;
-            byte[] bytes;
+            long savedLength = 0;
             try
             {
-                bytes = Convert.FromBase64String(message.Attachment.Data);
-                File.WriteAllBytes(dialog.FileName, bytes);
+                if (message.Attachment != null && !String.IsNullOrEmpty(message.Attachment.Data)
+                    && message.Attachment.Data.StartsWith("local:", StringComparison.OrdinalIgnoreCase))
+                {
+                    string localPath = message.Attachment.Data.Substring("local:".Length);
+                    File.Copy(localPath, dialog.FileName, true);
+                    savedLength = new FileInfo(dialog.FileName).Length;
+                }
+                else
+                {
+                    byte[] bytes = Convert.FromBase64String(message.Attachment.Data);
+                    File.WriteAllBytes(dialog.FileName, bytes);
+                    savedLength = bytes.LongLength;
+                }
             }
             catch (Exception error)
             {
@@ -425,13 +691,30 @@ namespace ZaloManagerPoc
                 NoticeDialog.Show(owner, "Không lưu được bản sao", error.Message);
                 return;
             }
-            NoticeDialog.FileSaved(owner, dialog.FileName, bytes.LongLength);
+            NoticeDialog.FileSaved(owner, dialog.FileName, savedLength);
         }
 
         private static bool IsRecallVideo(CdpMessageWatcher.RecalledMessage message)
         {
-            return message.Attachment.Kind == "video"
-                || (message.Attachment.Kind == "file" && (message.Attachment.Mime ?? "").StartsWith("video/", StringComparison.OrdinalIgnoreCase));
+            if (message == null || message.Attachment == null) return false;
+            if (message.Attachment.Kind == "video") return true;
+            if ((message.Attachment.Mime ?? "").StartsWith("video/", StringComparison.OrdinalIgnoreCase)) return true;
+            if (IsVideoExtension(message.Attachment.FileName)) return true;
+            if (IsVideoExtension(message.Content)) return true;
+            return false;
+        }
+
+        private static bool IsVideoExtension(string path)
+        {
+            if (String.IsNullOrWhiteSpace(path)) return false;
+            try
+            {
+                string ext = Path.GetExtension(path.Trim()).ToLowerInvariant();
+                return ext == ".mp4" || ext == ".m4v" || ext == ".webm" || ext == ".mov"
+                    || ext == ".avi" || ext == ".mkv" || ext == ".flv" || ext == ".wmv"
+                    || ext == ".3gp" || ext == ".ts";
+            }
+            catch { return false; }
         }
 
         private static string RecallAttachmentName(CdpMessageWatcher.RecalledMessage message)

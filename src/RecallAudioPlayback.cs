@@ -138,6 +138,12 @@ namespace ZaloManagerPoc
 
         private static string WritePlaybackFile(CdpMessageWatcher.RecalledMessage message)
         {
+            if (message.Attachment != null && !String.IsNullOrEmpty(message.Attachment.Data)
+                && message.Attachment.Data.StartsWith("local:", StringComparison.OrdinalIgnoreCase))
+            {
+                string localPath = message.Attachment.Data.Substring("local:".Length);
+                if (File.Exists(localPath)) return localPath;
+            }
             string extension = Path.GetExtension(RecallAttachmentName(message));
             string path = Path.Combine(Path.GetTempPath(), "zalo-recall-" + Guid.NewGuid().ToString("N") + extension);
             try { File.WriteAllBytes(path, Convert.FromBase64String(message.Attachment.Data)); }
@@ -148,6 +154,7 @@ namespace ZaloManagerPoc
         private static void DeletePlaybackFile(string path)
         {
             if (path == null) return;
+            if (!path.StartsWith(Path.GetTempPath(), StringComparison.OrdinalIgnoreCase)) return;
             try { File.Delete(path); }
             catch (IOException) { }
             catch (UnauthorizedAccessException) { }

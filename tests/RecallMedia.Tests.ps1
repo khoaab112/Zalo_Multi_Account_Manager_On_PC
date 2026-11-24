@@ -180,7 +180,9 @@ try {
             $data = $attachmentType.GetField('Data', $instance).GetValue($attachment)
             if ($expected.sha256) {
                 $actualHash = [BitConverter]::ToString($sha.ComputeHash([Convert]::FromBase64String($data))).Replace('-','')
-                if ($actualHash -ne $expected.sha256) { throw "Stored bytes differ for $($expected.id)." }
+                if ($actualHash -ne $expected.sha256) {
+                    throw "Stored bytes differ for $($expected.id)."
+                }
             } elseif ($data) {
                 throw "Unexpected bytes for $($expected.id)."
             }

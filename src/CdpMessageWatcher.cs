@@ -125,14 +125,19 @@ namespace ZaloManagerPoc
             }
         }
 
-        private static int FindPort(Profile profile)
+        internal static int FindPort(Profile profile)
         {
             using (var search = new ManagementObjectSearcher("SELECT ExecutablePath, CommandLine FROM Win32_Process WHERE Name='Zalo.exe'"))
             using (var results = search.Get())
                 foreach (ManagementObject process in results)
                 using (process)
                 {
-                    if (!String.Equals(process["ExecutablePath"] as string, profile.Executable, StringComparison.OrdinalIgnoreCase)) continue;
+                    string exe = process["ExecutablePath"] as string;
+                    if (String.IsNullOrEmpty(exe)) continue;
+                    string dir = Path.GetDirectoryName(profile.Executable);
+                    bool matchExe = String.Equals(exe, profile.Executable, StringComparison.OrdinalIgnoreCase)
+                        || (!String.IsNullOrEmpty(dir) && exe.StartsWith(dir.TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase));
+                    if (!matchExe) continue;
                     string commandLine = process["CommandLine"] as string ?? "";
                     if (Regex.IsMatch(commandLine, @"\s--type=")) continue;
                     var match = Regex.Match(commandLine, @"\s--remote-debugging-port=(\d+)\b");
@@ -185,8 +190,36 @@ namespace ZaloManagerPoc
                     {
                         connectTimeout.CancelAfter(5000);
                         await socket.ConnectAsync(socketUri, connectTimeout.Token);
-                        byte[] enable = Encoding.UTF8.GetBytes("{\"id\":1,\"method\":\"Network.enable\"}");
-                        await socket.SendAsync(new ArraySegment<byte>(enable), WebSocketMessageType.Text, true, token);
+                        
+                        // Cài đặt Endpoint trực tiếp vào Zalo:
+                        // 1. Network.enable
+                        await SendCdpCommand(socket, "{\"id\":1,\"method\":\"Network.enable\"}", token);
+                        // 2. Runtime.enable
+                        await SendCdpCommand(socket, "{\"id\":2,\"method\":\"Runtime.enable\"}", token);
+                        // 3. Runtime.addBinding
+                        await SendCdpCommand(socket, "{\"id\":3,\"method\":\"Runtime.addBinding\",\"params\":{\"name\":\"__zaloManagerDispatch\"}}", token);
+                        // 4. Page.enable
+                        await SendCdpCommand(socket, "{\"id\":4,\"method\":\"Page.enable\"}", token);
+                        
+                        // 5. Page.addScriptToEvaluateOnNewDocument (để sống qua reload)
+                        string hookScript = session.Messages.CreateHookScript(json);
+                        string addScriptCmd = json.Serialize(new
+                        {
+                            id = 5,
+                            method = "Page.addScriptToEvaluateOnNewDocument",
+                            @params = new { source = hookScript }
+                        });
+                        await SendCdpCommand(socket, addScriptCmd, token);
+                        
+                        // 6. Runtime.evaluate (để gài hook vào trang hiện tại ngay lập tức)
+                        string evalCmd = json.Serialize(new
+                        {
+                            id = 6,
+                            method = "Runtime.evaluate",
+                            @params = new { expression = hookScript, silent = true }
+                        });
+                        await SendCdpCommand(socket, evalCmd, token);
+
                         await Receive(profile, socket, session, json, token);
                     }
                 }
@@ -203,37 +236,21 @@ namespace ZaloManagerPoc
             }
         }
 
+        private static async Task SendCdpCommand(ClientWebSocket socket, string command, CancellationToken token)
+        {
+            byte[] bytes = Encoding.UTF8.GetBytes(command);
+            await socket.SendAsync(new ArraySegment<byte>(bytes), WebSocketMessageType.Text, true, token);
+        }
+
         private static async Task Receive(Profile profile, ClientWebSocket socket, Session session, JavaScriptSerializer json, CancellationToken token)
         {
-            const int queryInterval = 1000;
-            const int queryTimeout = 12000;
             byte[] buffer = new byte[16384];
-            byte[] query = Encoding.UTF8.GetBytes(session.Messages.CreateQuery(json));
-            var previewClock = System.Diagnostics.Stopwatch.StartNew();
-            long nextPreview = 0;
-            long queryDeadline = 0;
             using (var abort = token.Register(socket.Abort))
             using (var message = new MemoryStream())
             {
                 while (socket.State == WebSocketState.Open)
                 {
-                    var pending = socket.ReceiveAsync(new ArraySegment<byte>(buffer), token);
-                    do
-                    {
-                        token.ThrowIfCancellationRequested();
-                        long elapsed = previewClock.ElapsedMilliseconds;
-                        if (queryDeadline != 0 && elapsed >= queryDeadline)
-                            throw new TimeoutException("Zalo không trả lời yêu cầu quét hội thoại.");
-                        if (queryDeadline == 0 && elapsed >= nextPreview)
-                        {
-                            nextPreview = elapsed + queryInterval;
-                            queryDeadline = elapsed + queryTimeout;
-                            await socket.SendAsync(new ArraySegment<byte>(query), WebSocketMessageType.Text, true, token);
-                        }
-                        if (pending.IsCompleted) break;
-                        await Task.WhenAny(pending, Task.Delay(queryInterval, token));
-                    } while (!pending.IsCompleted);
-                    var result = await pending;
+                    var result = await socket.ReceiveAsync(new ArraySegment<byte>(buffer), token);
                     if (result.MessageType == WebSocketMessageType.Close) return;
                     if (result.MessageType != WebSocketMessageType.Text) throw new IOException("Unexpected CDP message type.");
                     if (message.Length + result.Count > 8 * 1024 * 1024) throw new IOException("CDP message exceeds limit.");
@@ -241,28 +258,48 @@ namespace ZaloManagerPoc
                     if (!result.EndOfMessage) continue;
                     var data = json.Deserialize<Dictionary<string, object>>(Encoding.UTF8.GetString(message.ToArray()));
                     message.SetLength(0);
+
                     object commandId;
                     if (data.TryGetValue("id", out commandId))
                     {
-                        if (Convert.ToInt32(commandId) == 2)
+                        int id = Convert.ToInt32(commandId);
+                        if (id == 2)
                         {
-                            queryDeadline = 0;
                             session.Messages.AcceptResponseWithDownloads(profile, data, token);
                             continue;
                         }
-                        if (data.ContainsKey("error")) throw new IOException("Network.enable rejected.");
-                        session.Status = "CDP đã kết nối";
+                        if (data.ContainsKey("error"))
+                            System.Diagnostics.Debug.WriteLine("CDP command " + id + " error: " + Text(data, "error"));
+                        session.Status = "CDP đã kết nối (Endpoint)";
                         session.Connected = true;
                     }
+
                     string method = Text(data, "method");
+                    if (method == "Runtime.bindingCalled")
+                    {
+                        var parameters = Dict(data, "params");
+                        if (parameters != null && Text(parameters, "name") == "__zaloManagerDispatch")
+                        {
+                            string payload = Text(parameters, "payload");
+                            ThreadPool.QueueUserWorkItem(delegate
+                            {
+                                try { session.Messages.AcceptBindingPayload(profile, payload, token); }
+                                catch (Exception ex) { System.Diagnostics.Debug.WriteLine("AcceptBindingPayload: " + ex.Message); }
+                            });
+                        }
+                        continue;
+                    }
+
                     if (method != "Network.webSocketFrameSent" && method != "Network.webSocketFrameReceived") continue;
-                    var parameters = (Dictionary<string, object>)data["params"];
-                    var frame = (Dictionary<string, object>)parameters["response"];
+                    var networkParams = Dict(data, "params");
+                    if (networkParams == null) continue;
+                    var frame = Dict(networkParams, "response");
+                    if (frame == null) continue;
                     bool outgoing = method == "Network.webSocketFrameSent";
                     if (outgoing) Interlocked.Increment(ref session.Sent); else Interlocked.Increment(ref session.Received);
                     var args = new ZaloFrameEventArgs { ProfileId = profile.Id, IsOutgoing = outgoing,
                         Opcode = Convert.ToInt32(frame["opcode"]), PayloadData = Text(frame, "payloadData"),
-                        RequestId = Text(parameters, "requestId"), ReceivedUtc = DateTime.UtcNow };
+                        RequestId = Text(networkParams, "requestId"), ReceivedUtc = DateTime.UtcNow };
                     var handlers = FrameReceived;
                     if (handlers != null)
                         foreach (EventHandler<ZaloFrameEventArgs> handler in handlers.GetInvocationList())
@@ -270,6 +307,12 @@ namespace ZaloManagerPoc
                             catch (Exception exception) { System.Diagnostics.Debug.WriteLine(exception.GetType().Name); }
                 }
             }
+        }
+
+        private static Dictionary<string, object> Dict(Dictionary<string, object> value, string key)
+        {
+            object item;
+            return value != null && value.TryGetValue(key, out item) ? item as Dictionary<string, object> : null;
         }
 
         private static bool MatchesProfileTarget(Profile profile, string url)

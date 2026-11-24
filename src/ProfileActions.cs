@@ -369,6 +369,11 @@ namespace ZaloManagerPoc
             if (profile == null || busy) return;
             string action = (string)control.Tag;
             if (action == "…") { ShowProfileMenu((Button)control, profile); return; }
+            if (action == "Xem tin đã thu hồi của hồ sơ này" || action == "Thu hồi")
+            {
+                OpenRecallWindow(profile);
+                return;
+            }
             SetBusy(true);
             try
             {

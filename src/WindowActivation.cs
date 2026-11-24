@@ -51,13 +51,28 @@ namespace ZaloManagerPoc
                 var windows = Find(processes.Where(process => process.ProcessName == "Zalo").Select(process => process.Id));
                 foreach (IntPtr window in windows)
                 {
-                    // Never show/restore Electron windows through Win32: their compositor
-                    // can remain hidden while the HWND is visible and still accepts clicks.
-                    if (IsWindowVisible(window) && !IsIconic(window)) { SetForegroundWindow(window); return true; }
+                    if (IsIconic(window))
+                    {
+                        ShowWindowAsync(window, 9);
+                        SetForegroundWindow(window);
+                        return true;
+                    }
+                    if (IsWindowVisible(window))
+                    {
+                        SetForegroundWindow(window);
+                        return true;
+                    }
                 }
                 return false;
             }
             finally { foreach (var process in processes) process.Dispose(); }
+        }
+
+        public static bool ActivateWindow(IntPtr window)
+        {
+            if (window == IntPtr.Zero) return false;
+            ShowWindowAsync(window, 9);
+            return SetForegroundWindow(window);
         }
 
         public static void HideForReopen(Profile profile)

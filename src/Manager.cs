@@ -403,20 +403,26 @@ namespace ZaloManagerPoc
         {
             using (var launch = new Mutex(false, "Local\\ZaloManagerProfileLaunch-" + profile.Id))
             {
-                try { launch.WaitOne(); }
+                try { launch.WaitOne(TimeSpan.FromSeconds(15)); }
                 catch (AbandonedMutexException) { }
                 try { return OpenProfile(profile); }
-                finally { launch.ReleaseMutex(); }
+                finally { try { launch.ReleaseMutex(); } catch (ApplicationException) { } }
             }
         }
 
         private static bool OpenProfile(Profile profile)
         {
             bool running = IsRunning(profile);
-            if (running && WindowActivation.Restore(profile))
+            int runningPort = running ? CdpMessageWatcher.FindPort(profile) : 0;
+            if (running && runningPort > 0 && WindowActivation.Restore(profile))
             {
-                CdpMessageWatcher.Start(profile, 0);
+                CdpMessageWatcher.Start(profile, runningPort);
                 return true;
+            }
+            if (running && runningPort == 0)
+            {
+                Stop(profile);
+                running = false;
             }
             if (!profile.IsOriginal && (String.IsNullOrEmpty(profile.PatchedHash) || Hash(Path.Combine(profile.DirectoryPath, "resources", "app.asar")) != profile.PatchedHash))
                 throw new InvalidDataException("Gói ứng dụng đã thay đổi hoặc chuẩn bị chưa hoàn tất. Cần kiểm tra tương thích trước khi mở.");
@@ -424,11 +430,17 @@ namespace ZaloManagerPoc
             // A crashed Electron main process can leave helpers behind. Pass a fresh
             // port even when those helpers made the profile appear to be running.
             int port = CdpMessageWatcher.AllocatePort();
-            using (Process.Start(new ProcessStartInfo(profile.Executable) { WorkingDirectory = Path.GetDirectoryName(profile.Executable), UseShellExecute = false,
-                Arguments = "--remote-debugging-address=127.0.0.1 --remote-debugging-port=" + port })) { }
+            var startInfo = new ProcessStartInfo(profile.Executable)
+            {
+                WorkingDirectory = Path.GetDirectoryName(profile.Executable),
+                UseShellExecute = false,
+                Arguments = "--remote-debugging-address=127.0.0.1 --remote-debugging-port=" + port
+            };
+            startInfo.EnvironmentVariables.Remove("ELECTRON_RUN_AS_NODE");
+            using (Process.Start(startInfo)) { }
             CdpMessageWatcher.Start(profile, running ? 0 : port);
-            for (int attempt = 0; attempt < 20; attempt++)
-            { System.Threading.Thread.Sleep(200); if (WindowActivation.Restore(profile)) return true; }
+            for (int attempt = 0; attempt < 40; attempt++)
+            { System.Threading.Thread.Sleep(250); if (WindowActivation.Restore(profile)) return true; }
             return false;
         }
 
@@ -548,8 +560,14 @@ namespace ZaloManagerPoc
             timer.Tick += delegate { if (!busy) UpdateProfileStatus(false); };
             timer.Start(); RefreshStatus();
             Loaded += async delegate { await Synchronize(false, false); };
+            Loaded += delegate { TrayManager.Initialize(this); };
             Closing += delegate(object sender, System.ComponentModel.CancelEventArgs args)
-            { if (busy) { args.Cancel = true; status.Text = "Đang chuẩn bị phiên bản. Chờ hoàn tất để đóng ứng dụng."; } };
+            {
+                if (busy) { args.Cancel = true; status.Text = "Đang chuẩn bị phiên bản. Chờ hoàn tất để đóng ứng dụng."; return; }
+                args.Cancel = true;
+                TrayManager.HideToTray();
+                TrayManager.ShowBalloon("Zalo Manager", "Ứng dụng đang chạy ngầm ở khay hệ thống để tiếp tục theo dõi tin nhắn thu hồi.");
+            };
             Action refreshRecallBadges = delegate
             {
                 Dispatcher.BeginInvoke(new Action(() => grid.Items.Refresh()));
@@ -562,6 +580,22 @@ namespace ZaloManagerPoc
                 CdpMessageWatcher.StopAll();
             };
             ApplyModernLayout();
+        }
+        protected override void OnSourceInitialized(EventArgs e)
+        {
+            base.OnSourceInitialized(e);
+            var helper = new System.Windows.Interop.WindowInteropHelper(this);
+            var source = System.Windows.Interop.HwndSource.FromHwnd(helper.Handle);
+            if (source != null) source.AddHook(WndProc);
+        }
+        private IntPtr WndProc(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
+        {
+            if (msg == TrayManager.WM_SHOW_MANAGER)
+            {
+                TrayManager.RestoreMainWindow();
+                handled = true;
+            }
+            return IntPtr.Zero;
         }
         private void SetBusy(bool value)
         {
@@ -720,14 +754,30 @@ namespace ZaloManagerPoc
         [STAThread]
         public static void Main(string[] args)
         {
+            AppDomain.CurrentDomain.UnhandledException += (s, e) =>
+            {
+                try
+                {
+                    Directory.CreateDirectory(Store.Root);
+                    File.AppendAllText(Path.Combine(Store.Root, "crash.log"),
+                        DateTimeOffset.Now.ToString("o") + " [AppDomain] " + (e.ExceptionObject != null ? e.ExceptionObject.ToString() : "null") + "\r\n");
+                }
+                catch { }
+            };
+            try { Environment.SetEnvironmentVariable("ELECTRON_RUN_AS_NODE", null); } catch { }
             ShellIdentity.SetManagerIdentity();
             // The file CDN can close the legacy Framework negotiation before returning HTTP.
             System.Net.ServicePointManager.SecurityProtocol = System.Net.SecurityProtocolType.Tls12;
+            CdpMessageWatcher.IncomingMessageCache.Initialize();
             bool profileLaunch = args.Length == 2 && args[0] == "--open-profile";
             bool owner;
             using (var mutex = new Mutex(true, "Local\\ZaloManagerPoC", out owner))
             {
-                if (!owner && !profileLaunch) { NoticeDialog.Show(null, "Zalo Manager", "Zalo Manager đang mở."); return; }
+                if (!owner && !profileLaunch)
+                {
+                    TrayManager.SignalShowManager();
+                    return;
+                }
                 try
                 {
                     if (profileLaunch)
@@ -747,7 +797,18 @@ namespace ZaloManagerPoc
                         File.WriteAllText(Path.Combine(Store.Root, "probe-result.txt"), "PREPARED\n" + profile.SourceHash + "\n" + profile.PatchedHash);
                         return;
                     }
-                    new Application().Run(new ManagerWindow());
+                    var app = new Application { ShutdownMode = ShutdownMode.OnMainWindowClose };
+                    app.DispatcherUnhandledException += (s, e) =>
+                    {
+                        try
+                        {
+                            Directory.CreateDirectory(Store.Root);
+                            File.AppendAllText(Path.Combine(Store.Root, "crash.log"),
+                                DateTimeOffset.Now.ToString("o") + " [Dispatcher] " + (e.Exception != null ? e.Exception.ToString() : "null") + "\r\n");
+                        }
+                        catch { }
+                    };
+                    app.Run(new ManagerWindow());
                 }
                 catch (Exception exception)
                 {
