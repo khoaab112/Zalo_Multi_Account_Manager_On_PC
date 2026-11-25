@@ -68,3 +68,13 @@ Mốc đối chiếu `a84b2f9`. Trước khi sửa, đối chiếu HEAD hiện t
 - **Nghiệm thu trên Zalo thật** dùng Zalo gốc và ít nhất một clone. Thử nhận rồi thu hồi ngay, xóa phía mình, chat nhóm, không mở hội thoại, thu nhỏ, mất kết nối, reload và hai hồ sơ chạy cùng lúc. Dùng dữ liệu thử, không đưa nội dung chat hoặc dump cache thật vào repo.
 - **So sánh trước và sau** trên cùng máy, bản Zalo và dữ liệu thử. Báo số sự kiện mất/trùng, độ trễ p95 từ nhận sự kiện đến ghi nhận, RAM đỉnh, RAM khi chạy lâu, I/O ghi và dung lượng trước/sau khi dọn. Chốt ngưỡng hiệu năng sau khi có số đo đường cơ sở.
 - **Điều kiện bật mặc định** là các ca P1 đạt, dữ liệu cũ mở được, và dọn media đã được kiểm chứng trong tình huống ghi đồng thời hoặc khởi động lại sau crash. Chỉ mở lại quyết định về transport nếu kiểm thử cho thấy CDP không đáp ứng vòng đời hoặc độ bao phủ cần thiết.
+
+## Kết quả kiểm thử hiện tại
+
+- Build và các bộ test `Cdp.Tests.ps1`, `IncomingCache.Tests.ps1`, `RecallMedia.Tests.ps1` đã pass. Ca quét media xác nhận báo đúng tệp hết tham chiếu, giữ nguyên các tệp và hoãn quét khi kho thu hồi không đọc được.
+- Quét định kỳ và mục **Xem tệp có thể dọn** trong cửa sổ thu hồi hiện chỉ báo số tệp và dung lượng đủ điều kiện. Chưa bật xóa tự động.
+- Phép đo cục bộ dùng một tệp thử 50 MiB, với SHA-256 và ghi bền xuống đĩa ở cả hai phương án. Trung vị 3 lượt, so với `e0db755`, RAM đỉnh của tiến trình đo giảm từ **333,3 MiB xuống 107,8 MiB** và thời gian xử lý giảm từ **513 ms xuống 377 ms**. Bài đo chỉ bao gồm sao chép media cục bộ.
+- Ca văn bản trên Zalo gốc và clone `900001` đã đạt trong hai hội thoại người dùng xác nhận. Cả hai bộ nhận báo sẵn sàng. Một tin thử xuất hiện ở hai đầu, biến mất sau thu hồi và kho thử ở phía nhận giữ đúng một bản ghi có nội dung gốc.
+- Cùng tin thử cho thấy phía gửi có hai mục cache với hai ID tin và một `cliMsgId`. Cần xác minh cách hợp nhất bản gửi tạm với bản xác nhận trước khi chốt số liệu sự kiện trùng.
+- Bộ test media cục bộ đã pass cho ảnh, sticker, tệp, thoại và video. Ca ZIP trên hai tài khoản thật chưa chạy qua bước gửi. Còn cần xác nhận tin đến, thu hồi và đối chiếu byte trong kho sau thu hồi.
+- Còn cần đo độ trễ p95, tỷ lệ mất/trùng sự kiện, I/O và RAM dài hạn khi chạy nhiều hồ sơ trước khi chốt điều kiện bật mặc định.

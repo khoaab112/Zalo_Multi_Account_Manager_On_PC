@@ -32,6 +32,82 @@ namespace ZaloManagerPoc
             public readonly CancellationTokenSource Cancellation = new CancellationTokenSource();
             public volatile string Status = "CDP đang kết nối";
             public volatile bool Connected;
+            public long Dropped;
+            public Task Completion;
+            private const int MaxQueuedEvents = 256;
+            private const int MaxQueuedBytes = 16 * 1024 * 1024;
+            private readonly object intakeGate = new object();
+            private readonly Queue<string> events = new Queue<string>();
+            private readonly SemaphoreSlim available = new SemaphoreSlim(0);
+            private int queuedBytes;
+            private bool completed;
+            public volatile bool DiscardQueuedEvents;
+
+            public void Post(string payload)
+            {
+                lock (intakeGate)
+                {
+                    if (completed) return;
+                    int bytes = payload.Length * sizeof(char);
+                    if (events.Count >= MaxQueuedEvents || queuedBytes + bytes > MaxQueuedBytes)
+                    {
+                        if (payload.Length != 0) Interlocked.Increment(ref Dropped);
+                        return;
+                    }
+                    events.Enqueue(payload);
+                    queuedBytes += bytes;
+                    available.Release();
+                }
+            }
+
+            public void Complete()
+            {
+                lock (intakeGate)
+                {
+                    completed = true;
+                    available.Release();
+                }
+            }
+
+            public bool PostDownload(Action publish)
+            {
+                lock (intakeGate)
+                {
+                    if (completed || DiscardQueuedEvents) return false;
+                    publish();
+                    Post("");
+                    return true;
+                }
+            }
+
+            public async Task Process(Profile profile)
+            {
+                while (true)
+                {
+                    if (await available.WaitAsync(Messages.PendingTimeout).ConfigureAwait(false))
+                    {
+                        string payload = null;
+                        lock (intakeGate)
+                        {
+                            if (events.Count != 0)
+                            {
+                                payload = events.Dequeue();
+                                queuedBytes -= payload.Length * sizeof(char);
+                            }
+                            else if (completed) break;
+                        }
+                        if (!String.IsNullOrEmpty(payload) && !DiscardQueuedEvents)
+                        {
+                            try { Messages.AcceptBindingPayload(profile, payload, Cancellation.Token); }
+                            catch (Exception error) { System.Diagnostics.Debug.WriteLine(error.GetType().Name); }
+                        }
+                    }
+                    try { Messages.Maintain(profile); }
+                    catch (Exception error) { Store.Log(error); }
+                }
+                Messages.Maintain(profile, true);
+            }
+
             public long Sent;
             public long Received;
             public readonly VisibleMessages Messages = new VisibleMessages();
@@ -40,6 +116,7 @@ namespace ZaloManagerPoc
         private static readonly object Gate = new object();
         private static readonly Dictionary<string, Session> Sessions = new Dictionary<string, Session>();
         public static event EventHandler<ZaloFrameEventArgs> FrameReceived;
+        private static bool shuttingDown;
 
         public static int AllocatePort()
         {
@@ -50,12 +127,13 @@ namespace ZaloManagerPoc
 
         public static string GetStatus(Profile profile)
         {
+            if (!IsRecallEnabled(profile.Id)) return "Đã tắt theo dõi tin thu hồi";
             lock (Gate)
             {
                 Session session;
                 if (!Sessions.TryGetValue(profile.Id, out session)) return "CDP chưa kết nối · mở hồ sơ từ Manager";
                 return session.Status + " · gửi " + Interlocked.Read(ref session.Sent) + " / nhận " + Interlocked.Read(ref session.Received) + " frame"
-                    + Environment.NewLine + session.Messages.Status;
+                    + " · sự kiện bỏ: " + Interlocked.Read(ref session.Dropped) + Environment.NewLine + session.Messages.Status;
             }
         }
 
@@ -73,7 +151,7 @@ namespace ZaloManagerPoc
             lock (Gate)
             {
                 Session session;
-                return Sessions.TryGetValue(profile.Id, out session) && session.Connected && session.Messages.ConversationOpen;
+                return Sessions.TryGetValue(profile.Id, out session) && session.Connected && IsRecallEnabled(profile.Id);
             }
         }
 
@@ -82,14 +160,20 @@ namespace ZaloManagerPoc
         {
             lock (Gate)
             {
-                if (Sessions.ContainsKey(profile.Id)) return;
+                if (shuttingDown || Sessions.ContainsKey(profile.Id) || !IsRecallEnabled(profile.Id)) return;
                 var session = new Session();
                 Sessions.Add(profile.Id, session);
-                Task.Run(async delegate
+                session.Messages.PostDownload = session.PostDownload;
+                session.Completion = Task.Run(async delegate
                 {
+                    var processor = session.Process(profile);
                     try { await Watch(profile, port, session); }
                     catch (OperationCanceledException) { }
                     catch (Exception exception) { Store.Log(exception); }
+                    session.Cancellation.Cancel();
+                    session.Complete();
+                    try { await processor; }
+                    catch (Exception error) { Store.Log(error); }
                     finally
                     {
                         lock (Gate)
@@ -105,12 +189,17 @@ namespace ZaloManagerPoc
 
         public static void Stop(Profile profile)
         {
+            StopRecallProfile(profile.Id);
+        }
+
+        private static void StopRecallProfile(string profileId)
+        {
             lock (Gate)
             {
                 Session session;
-                if (Sessions.TryGetValue(profile.Id, out session))
+                if (Sessions.TryGetValue(profileId, out session))
                 {
-                    Sessions.Remove(profile.Id);
+                    session.DiscardQueuedEvents = true;
                     session.Cancellation.Cancel();
                 }
             }
@@ -120,31 +209,69 @@ namespace ZaloManagerPoc
         {
             lock (Gate)
             {
-                foreach (var session in new List<Session>(Sessions.Values)) session.Cancellation.Cancel();
-                Sessions.Clear();
+                foreach (var session in Sessions.Values)
+                {
+                    session.DiscardQueuedEvents = true;
+                    session.Cancellation.Cancel();
+                }
             }
         }
 
+        internal static Task StopForShutdown()
+        {
+            lock (Gate)
+            {
+                shuttingDown = true;
+                var tasks = new List<Task>();
+                foreach (var session in Sessions.Values)
+                {
+                    session.Cancellation.Cancel();
+                    tasks.Add(session.Completion);
+                }
+                return Task.WhenAll(tasks);
+            }
+        }
+
+        internal static void ResumeAfterFailedShutdown()
+        {
+            lock (Gate) shuttingDown = false;
+        }
+
+        private static readonly object PortDiscoveryGate = new object();
+        private static readonly System.Diagnostics.Stopwatch PortDiscoveryClock = System.Diagnostics.Stopwatch.StartNew();
+        private static List<KeyValuePair<string, int>> discoveredPorts = new List<KeyValuePair<string, int>>();
+        private static long portDiscoveryExpires;
+
         internal static int FindPort(Profile profile)
         {
-            using (var search = new ManagementObjectSearcher("SELECT ExecutablePath, CommandLine FROM Win32_Process WHERE Name='Zalo.exe'"))
-            using (var results = search.Get())
-                foreach (ManagementObject process in results)
-                using (process)
+            var directory = Path.GetDirectoryName(profile.Executable);
+            var prefix = String.IsNullOrEmpty(directory) ? null : directory.TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
+            lock (PortDiscoveryGate)
+            {
+                if (PortDiscoveryClock.ElapsedMilliseconds >= portDiscoveryExpires)
                 {
-                    string exe = process["ExecutablePath"] as string;
-                    if (String.IsNullOrEmpty(exe)) continue;
-                    string dir = Path.GetDirectoryName(profile.Executable);
-                    bool matchExe = String.Equals(exe, profile.Executable, StringComparison.OrdinalIgnoreCase)
-                        || (!String.IsNullOrEmpty(dir) && exe.StartsWith(dir.TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase));
-                    if (!matchExe) continue;
-                    string commandLine = process["CommandLine"] as string ?? "";
-                    if (Regex.IsMatch(commandLine, @"\s--type=")) continue;
-                    var match = Regex.Match(commandLine, @"\s--remote-debugging-port=(\d+)\b");
-                    int port;
-                    if (match.Success && Int32.TryParse(match.Groups[1].Value, out port) && port > 0 && port <= 65535) return port;
+                    var found = new List<KeyValuePair<string, int>>();
+                    using (var search = new ManagementObjectSearcher("SELECT ExecutablePath, CommandLine FROM Win32_Process WHERE Name='Zalo.exe'"))
+                    using (var results = search.Get())
+                        foreach (ManagementObject process in results)
+                        using (process)
+                        {
+                            string executable = process["ExecutablePath"] as string;
+                            string commandLine = process["CommandLine"] as string ?? "";
+                            if (String.IsNullOrEmpty(executable) || Regex.IsMatch(commandLine, @"\s--type=")) continue;
+                            Match match = Regex.Match(commandLine, @"\s--remote-debugging-port=(\d+)\b");
+                            int port;
+                            if (match.Success && Int32.TryParse(match.Groups[1].Value, out port) && port > 0 && port <= 65535)
+                                found.Add(new KeyValuePair<string, int>(executable, port));
+                        }
+                    discoveredPorts = found;
+                    portDiscoveryExpires = PortDiscoveryClock.ElapsedMilliseconds + 1500;
                 }
-            return 0;
+                foreach (var entry in discoveredPorts)
+                    if (String.Equals(entry.Key, profile.Executable, StringComparison.OrdinalIgnoreCase) ||
+                        (prefix != null && entry.Key.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))) return entry.Value;
+                return 0;
+            }
         }
 
         private static async Task Watch(Profile profile, int port, Session session)
@@ -202,7 +329,8 @@ namespace ZaloManagerPoc
                         await SendCdpCommand(socket, "{\"id\":4,\"method\":\"Page.enable\"}", token);
                         
                         // 5. Page.addScriptToEvaluateOnNewDocument (để sống qua reload)
-                        string hookScript = session.Messages.CreateHookScript(json);
+                        string bindingSession = Guid.NewGuid().ToString("N");
+                        string hookScript = session.Messages.CreateHookScript(json, bindingSession);
                         string addScriptCmd = json.Serialize(new
                         {
                             id = 5,
@@ -218,9 +346,16 @@ namespace ZaloManagerPoc
                             method = "Runtime.evaluate",
                             @params = new { expression = hookScript, silent = true }
                         });
+                        await SendCdpCommand(socket, "{\"id\":7,\"method\":\"Page.getFrameTree\"}", token);
                         await SendCdpCommand(socket, evalCmd, token);
 
-                        await Receive(profile, socket, session, json, token);
+                        try { await Receive(profile, socket, session, json, bindingSession, token); }
+                        catch (Exception)
+                        {
+                            if (!token.IsCancellationRequested) throw;
+                        }
+                        if (token.IsCancellationRequested)
+                            await StopRendererHook(socketUri, bindingSession, json);
                     }
                 }
                 catch (Exception exception)
@@ -236,18 +371,46 @@ namespace ZaloManagerPoc
             }
         }
 
+        private static async Task StopRendererHook(Uri endpoint, string bindingSession, JavaScriptSerializer json)
+        {
+            using (var cleanup = new ClientWebSocket())
+            using (var timeout = new CancellationTokenSource(1500))
+            {
+                try
+                {
+                    await cleanup.ConnectAsync(endpoint, timeout.Token);
+                    string expression = "if (window.__zaloRecallHook && window.__zaloRecallHook.session === " +
+                        json.Serialize(bindingSession) + ") window.__zaloRecallHook.stop()";
+                    await SendCdpCommand(cleanup, json.Serialize(new
+                    {
+                        id = 1, method = "Runtime.evaluate", @params = new { expression = expression }
+                    }), timeout.Token);
+                    var reply = new byte[1024];
+                    await cleanup.ReceiveAsync(new ArraySegment<byte>(reply), timeout.Token);
+                }
+                catch (Exception error) { System.Diagnostics.Debug.WriteLine(error.GetType().Name); }
+            }
+        }
+
         private static async Task SendCdpCommand(ClientWebSocket socket, string command, CancellationToken token)
         {
             byte[] bytes = Encoding.UTF8.GetBytes(command);
             await socket.SendAsync(new ArraySegment<byte>(bytes), WebSocketMessageType.Text, true, token);
         }
 
-        private static async Task Receive(Profile profile, ClientWebSocket socket, Session session, JavaScriptSerializer json, CancellationToken token)
+        private static async Task Receive(Profile profile, ClientWebSocket socket, Session session, JavaScriptSerializer json, string bindingSession, CancellationToken token)
         {
             byte[] buffer = new byte[16384];
-            using (var abort = token.Register(socket.Abort))
+            string mainFrame = null;
+            int mainContext = 0;
+            int readyContext = 0;
+            var defaultContexts = new Dictionary<string, int>();
+            var pendingCommands = new HashSet<int> { 1, 2, 3, 4, 5, 6, 7 };
+            using (var setup = CancellationTokenSource.CreateLinkedTokenSource(token))
+            using (var abort = setup.Token.Register(socket.Abort))
             using (var message = new MemoryStream())
             {
+                setup.CancelAfter(8000);
                 while (socket.State == WebSocketState.Open)
                 {
                     var result = await socket.ReceiveAsync(new ArraySegment<byte>(buffer), token);
@@ -263,30 +426,88 @@ namespace ZaloManagerPoc
                     if (data.TryGetValue("id", out commandId))
                     {
                         int id = Convert.ToInt32(commandId);
-                        if (id == 2)
+                        var resultData = Dict(data, "result");
+                        if (data.ContainsKey("error") || (resultData != null && resultData.ContainsKey("exceptionDetails")))
+                            throw new IOException("Lệnh CDP " + id + " thất bại.");
+                        pendingCommands.Remove(id);
+                        if (id == 7)
                         {
-                            session.Messages.AcceptResponseWithDownloads(profile, data, token);
-                            continue;
+                            var frameTree = Dict(resultData, "frameTree");
+                            var main = Dict(frameTree, "frame");
+                            mainFrame = main == null ? null : Text(main, "id");
+                            if (mainFrame == null) throw new IOException("Không tìm thấy frame chính của Zalo.");
+                            defaultContexts.TryGetValue(mainFrame, out mainContext);
                         }
-                        if (data.ContainsKey("error"))
-                            System.Diagnostics.Debug.WriteLine("CDP command " + id + " error: " + Text(data, "error"));
-                        session.Status = "CDP đã kết nối (Endpoint)";
-                        session.Connected = true;
+                        if (pendingCommands.Count == 0)
+                        {
+                            setup.CancelAfter(Timeout.Infinite);
+                            SetHookStatus(session, mainContext != 0 && readyContext == mainContext);
+                        }
+                        continue;
                     }
 
                     string method = Text(data, "method");
+                    var parameters = Dict(data, "params");
+                    if (method == "Page.frameNavigated")
+                    {
+                        var navigatedFrame = Dict(parameters, "frame");
+                        string frameId = navigatedFrame == null ? null : Text(navigatedFrame, "id");
+                        if (frameId != null && !navigatedFrame.ContainsKey("parentId") && frameId != mainFrame)
+                        {
+                            mainFrame = frameId;
+                            defaultContexts.TryGetValue(mainFrame, out mainContext);
+                            SetHookStatus(session, pendingCommands.Count == 0 && mainContext != 0 && mainContext == readyContext);
+                        }
+                        continue;
+                    }
+                    if (method == "Runtime.executionContextCreated")
+                    {
+                        var context = Dict(parameters, "context");
+                        var aux = Dict(context, "auxData");
+                        object isDefault, contextId;
+                        if (aux != null && aux.TryGetValue("isDefault", out isDefault) && true.Equals(isDefault)
+                            && context.TryGetValue("id", out contextId))
+                        {
+                            string frameId = Text(aux, "frameId");
+                            if (!String.IsNullOrEmpty(frameId))
+                            {
+                                defaultContexts[frameId] = Convert.ToInt32(contextId);
+                                if (frameId == mainFrame)
+                                {
+                                    mainContext = defaultContexts[frameId];
+                                    SetHookStatus(session, false);
+                                }
+                            }
+                        }
+                        continue;
+                    }
+                    if (method == "Runtime.executionContextsCleared" ||
+                        (method == "Runtime.executionContextDestroyed" && parameters != null &&
+                         parameters.ContainsKey("executionContextId") && Convert.ToInt32(parameters["executionContextId"]) == mainContext))
+                    {
+                        defaultContexts.Clear();
+                        mainContext = readyContext = 0;
+                        SetHookStatus(session, false);
+                        continue;
+                    }
                     if (method == "Runtime.bindingCalled")
                     {
-                        var parameters = Dict(data, "params");
-                        if (parameters != null && Text(parameters, "name") == "__zaloManagerDispatch")
+                        if (parameters == null || Text(parameters, "name") != "__zaloManagerDispatch" ||
+                            !parameters.ContainsKey("executionContextId")) continue;
+                        int eventContext = Convert.ToInt32(parameters["executionContextId"]);
+
+                        string payload = Text(parameters, "payload");
+                        if (payload == null || !payload.StartsWith(bindingSession + ":", StringComparison.Ordinal)) continue;
+                        payload = payload.Substring(bindingSession.Length + 1);
+                        if (payload == "ready" || payload == "waiting")
                         {
-                            if (profile != null && !IsRecallEnabled(profile.Id)) continue;
-                            string payload = Text(parameters, "payload");
-                            ThreadPool.QueueUserWorkItem(delegate
-                            {
-                                try { session.Messages.AcceptBindingPayload(profile, payload, token); }
-                                catch (Exception ex) { System.Diagnostics.Debug.WriteLine("AcceptBindingPayload: " + ex.Message); }
-                            });
+                            if (mainContext != 0 && eventContext != mainContext) continue;
+                            readyContext = payload == "ready" ? eventContext : 0;
+                            if (pendingCommands.Count == 0) SetHookStatus(session, mainContext != 0 && readyContext == mainContext);
+                        }
+                        else if (pendingCommands.Count == 0 && session.Connected && eventContext == mainContext)
+                        {
+                            session.Post(payload);
                         }
                         continue;
                     }
@@ -308,6 +529,12 @@ namespace ZaloManagerPoc
                             catch (Exception exception) { System.Diagnostics.Debug.WriteLine(exception.GetType().Name); }
                 }
             }
+        }
+
+        private static void SetHookStatus(Session session, bool ready)
+        {
+            session.Connected = ready;
+            session.Status = ready ? "Đang theo dõi sự kiện Zalo" : "CDP đang chờ bộ phát sự kiện Zalo";
         }
 
         private static Dictionary<string, object> Dict(Dictionary<string, object> value, string key)

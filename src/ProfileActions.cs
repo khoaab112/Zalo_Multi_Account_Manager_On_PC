@@ -556,7 +556,12 @@ namespace ZaloManagerPoc
                 status.Text = "Đang xử lý dữ liệu. Clone đang chạy sẽ được tự dừng và mở lại sau khi hoàn tất…";
                 await Task.Run(() => ProfileActions.TransferWithRestart(profile, path, import));
                 status.Text = import ? "Đã thay dữ liệu, kiểm tra ID tài khoản và giữ bản cũ. Cần kiểm tra đăng nhập, tin nhắn và tệp trong Zalo." : "Đã xuất thư mục data của clone và kiểm tra SHA-256. Không gồm tệp tải ngoài thư mục; chưa xác minh khôi phục phiên đăng nhập.";
-                if (import) NoticeDialog.Success(this, "Đã nhập dữ liệu", status.Text, profile.Name);
+                if (import)
+                {
+                    profileStorageRefreshRequested = true;
+                    RefreshStatus();
+                    NoticeDialog.Success(this, "Đã nhập dữ liệu", status.Text, profile.Name);
+                }
                 else NoticeDialog.FileSaved(this, path, new FileInfo(path).Length, "Xuất dữ liệu thành công");
             }
             catch (Exception exception) { Report(exception); }

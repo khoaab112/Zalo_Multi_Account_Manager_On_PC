@@ -2,6 +2,7 @@ using System;
 using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
@@ -130,6 +131,28 @@ namespace ZaloManagerPoc
             storagePanel.Children.Add(storageLabel);
             storagePanel.Children.Add(storageValue);
             storageBadge.Child = storagePanel;
+            var storageMenu = new ContextMenu();
+            var cleanMedia = new MenuItem { Header = "Xem tệp có thể dọn" };
+            storageMenu.Items.Add(cleanMedia);
+            storageBadge.ContextMenu = storageMenu;
+            cleanMedia.Click += async delegate
+            {
+                cleanMedia.IsEnabled = false;
+                try
+                {
+                    var report = await CdpMessageWatcher.ScanRecallMediaNow();
+                    NoticeDialog.Show(dialog, "Báo cáo media", report == null
+                        ? "Chưa thể quét media. Đợi lượt quét hiện tại hoặc kiểm tra trạng thái kho rồi thử lại."
+                        : "Có " + report.CandidateCount + " tệp có thể dọn, chiếm " +
+                            StorageMeasurement.Format(report.CandidateBytes) + " trên đĩa. Lượt quét chỉ lập báo cáo.");
+                }
+                catch (Exception error)
+                {
+                    Store.Log(error);
+                    NoticeDialog.Show(dialog, "Báo cáo media", "Không thể hoàn tất lượt quét.");
+                }
+                finally { cleanMedia.IsEnabled = true; }
+            };
             DockPanel.SetDock(storageBadge, Dock.Right);
             header.Children.Add(storageBadge);
 
@@ -212,8 +235,8 @@ namespace ZaloManagerPoc
                 "• Dữ liệu tin nhắn và các file đa phương tiện (ảnh, video...) được lưu trực tiếp trên ổ cứng máy tính của bạn.\n" +
                 "• Việc nhận nhiều tệp media lớn có thể làm tăng dung lượng đĩa và mức sử dụng RAM khi giải mã hình ảnh.\n\n" +
                 "3. Quyền riêng tư & Quản lý:\n" +
-                "• Toàn bộ dữ liệu được lưu ngoại tuyến (offline) và mã hóa an toàn trên máy bạn, không gửi lên bất kỳ máy chủ bên ngoài nào.\n" +
-                "• Bạn có thể tắt tính năng bất cứ lúc nào bằng công tắc này hoặc bấm nút 'Xóa tất cả' để giải phóng toàn bộ dung lượng.";
+                "• Kho tin nhắn trên máy được mã hóa. Các tệp đính kèm được lưu riêng trên máy.\n" +
+                "• Bạn có thể tắt theo dõi, xóa bản ghi thu hồi và xem báo cáo các tệp không còn được sử dụng.";
 
             CdpMessageWatcher.RecallConversation selected = null;
 
@@ -272,6 +295,17 @@ namespace ZaloManagerPoc
             DockPanel.SetDock(storageStatus, Dock.Bottom);
             root.Children.Add(storageStatus);
 
+            const int pageSize = 60;
+            int page = 0;
+            var pageBar = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(18, 0, 18, 6),
+                Visibility = Visibility.Collapsed };
+            var older = new Button { Content = "Cũ hơn", Style = (Style)Resources["RowActionButton"] };
+            var newer = new Button { Content = "Mới hơn", Style = (Style)Resources["RowActionButton"], Margin = new Thickness(8, 0, 0, 0) };
+            pageBar.Children.Add(older);
+            pageBar.Children.Add(newer);
+            DockPanel.SetDock(pageBar, Dock.Top);
+            root.Children.Add(pageBar);
+
             var items = new StackPanel { Margin = new Thickness(18, 2, 18, 14) };
             var scroll = new ScrollViewer { Content = items, VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
                 HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled, Focusable = false };
@@ -295,11 +329,16 @@ namespace ZaloManagerPoc
                     storageValue.Text = convInfo.FormattedTotal;
                     storageBadge.ToolTip = "Dung lượng cuộc trò chuyện này:\n" +
                         "• Tin nhắn văn bản: " + convInfo.FormattedText + " (" + convInfo.TextCount + " tin)\n" +
-                        "• Tệp đa phương tiện: " + convInfo.FormattedMedia + " (" + convInfo.MediaCount + " tệp)\n" +
+                        "• Tệp đa phương tiện: " + convInfo.FormattedMedia + " (" + convInfo.MediaCount + " tin có tệp)\n" +
                         "• Tổng dung lượng: " + convInfo.FormattedTotal;
 
-                    var messages = CdpMessageWatcher.ReadRecallConversation(profile.Id, selected.Id)
-                        .OrderBy(message => message.DetectedAt).ToArray();
+                    var allMessages = CdpMessageWatcher.ReadRecallConversation(profile.Id, selected.Id);
+                    page = Math.Min(page, Math.Max(0, (allMessages.Length - 1) / pageSize));
+                    int end = Math.Max(0, allMessages.Length - page * pageSize);
+                    var messages = allMessages.Skip(Math.Max(0, end - pageSize)).Take(pageSize).ToArray();
+                    pageBar.Visibility = allMessages.Length > pageSize ? Visibility.Visible : Visibility.Collapsed;
+                    older.IsEnabled = end > pageSize;
+                    newer.IsEnabled = page > 0;
                     renderedRevision = CdpMessageWatcher.RecallRevision;
                     deleteAll.IsEnabled = messages.Length > 0;
 
@@ -310,9 +349,7 @@ namespace ZaloManagerPoc
                         {
                             var m1 = messages[i];
                             var m2 = displayedMessages[i];
-                            if (m1.Id != m2.Id || m1.Content != m2.Content
-                                || (m1.Attachment != null) != (m2.Attachment != null)
-                                || (m1.Attachment != null && (m1.Attachment.Data != m2.Attachment.Data || m1.Attachment.CaptureStatus != m2.Attachment.CaptureStatus)))
+                            if (!SameRecallBubble(m1, m2))
                             {
                                 sameMessages = false;
                                 break;
@@ -337,9 +374,7 @@ namespace ZaloManagerPoc
                         {
                             var m1 = messages[i];
                             var m2 = displayedMessages[i];
-                            if (m1.Id != m2.Id || m1.Content != m2.Content
-                                || (m1.Attachment != null) != (m2.Attachment != null)
-                                || (m1.Attachment != null && (m1.Attachment.Data != m2.Attachment.Data || m1.Attachment.CaptureStatus != m2.Attachment.CaptureStatus)))
+                            if (!SameRecallBubble(m1, m2))
                             {
                                 prefixMatches = false;
                                 break;
@@ -374,15 +409,16 @@ namespace ZaloManagerPoc
                 renderedRevision = revision;
 
                 heading.Text = "Tin đã thu hồi";
+                pageBar.Visibility = Visibility.Collapsed;
                 toggleContainer.Visibility = Visibility.Visible;
                 updateToggleVisual();
                 var totalInfo = CdpMessageWatcher.GetRecallStorageInfo(profile.Id);
-                storageLabel.Text = "Lưu trữ: ";
+                storageLabel.Text = "Nội dung: ";
                 storageValue.Text = totalInfo.FormattedTotal;
                 storageBadge.ToolTip = "Tổng dung lượng lưu trữ tin thu hồi:\n" +
                     "• Tin nhắn văn bản: " + totalInfo.FormattedText + " (" + totalInfo.TextCount + " tin)\n" +
-                    "• Tệp đa phương tiện (ảnh, video, audio): " + totalInfo.FormattedMedia + " (" + totalInfo.MediaCount + " tệp ảnh, video, thoại...)\n" +
-                    "• Tổng dung lượng đĩa: " + totalInfo.FormattedTotal + "\n(Bao gồm toàn bộ dữ liệu tin nhắn và file media đã lưu)";
+                    "• Tệp đa phương tiện: " + totalInfo.FormattedMedia + " (" + totalInfo.MediaCount + " tin có tệp)\n" +
+                    "• Dung lượng nội dung: " + totalInfo.FormattedTotal + "\nXem dung lượng trên đĩa ở màn hình chính.";
 
                 items.Children.Clear();
                 var conversations = CdpMessageWatcher.GetRecallConversations(profile.Id);
@@ -401,6 +437,7 @@ namespace ZaloManagerPoc
                     card.Click += delegate
                     {
                         selected = conversation;
+                        page = 0;
                         displayedMessages = new CdpMessageWatcher.RecalledMessage[0];
                         items.Children.Clear();
                         heading.Text = selected.Name;
@@ -421,17 +458,41 @@ namespace ZaloManagerPoc
                 if (conversations.Length == 0)
                     items.Children.Add(RecallEmpty("Chưa có tin thu hồi."));
             };
-            deleteAll.Click += delegate
+            Action changePage = delegate
             {
+                items.Children.Clear();
+                displayedMessages = new CdpMessageWatcher.RecalledMessage[0];
+                renderedRevision = -1;
+                refresh();
+                if (page != 0) scroll.ScrollToTop();
+            };
+            older.Click += delegate { page++; changePage(); };
+            newer.Click += delegate { page--; changePage(); };
+
+            bool deleting = false;
+            deleteAll.Click += async delegate
+            {
+                if (deleting) return;
                 var conversation = selected;
                 if (!ConfirmDialog.AskRecallDeletion(dialog, profile.Name, conversation == null ? null : conversation.Name)) return;
-                bool saved = conversation == null
-                    ? CdpMessageWatcher.DeleteAllRecalls(profile.Id)
-                    : CdpMessageWatcher.DeleteRecallConversation(profile.Id, conversation.Id);
-                if (!saved) NoticeDialog.Show(dialog, "Không xóa được tin", CdpMessageWatcher.RecallStorageError);
-                refresh();
-                if (saved) NoticeDialog.Success(dialog, "Đã xóa tin thu hồi", "Các tin thu hồi đã được xóa khỏi máy.",
-                    conversation == null ? profile.Name : conversation.Name);
+                deleting = true;
+                try
+                {
+                    var result = await Task.Run(() => CdpMessageWatcher.DeleteRecalls(profile.Id, conversation == null ? null : conversation.Id));
+                    if (result.Saved) RefreshRecallStorageAfterDeletion();
+                    if (!dialog.IsLoaded) return;
+                    refresh();
+                    if (!result.Saved) NoticeDialog.Show(dialog, "Không xóa được tin", CdpMessageWatcher.RecallStorageError);
+                    else NoticeDialog.Success(dialog, "Đã xóa tin thu hồi",
+                        "Đã giải phóng " + StorageMeasurement.Format(result.ReleasedBytes) + " tệp đính kèm.",
+                        conversation == null ? profile.Name : conversation.Name);
+                }
+                catch (Exception error)
+                {
+                    Store.Log(error);
+                    if (dialog.IsLoaded) NoticeDialog.Show(dialog, "Xóa tin thu hồi", "Không hoàn tất được thao tác. Hãy kiểm tra lại danh sách.");
+                }
+                finally { deleting = false; }
             };
             back.Click += delegate
             {
@@ -456,6 +517,18 @@ namespace ZaloManagerPoc
             dialog.Closed += delegate { timer.Stop(); };
             refresh();
             return dialog;
+        }
+
+        private static bool SameRecallBubble(CdpMessageWatcher.RecalledMessage left, CdpMessageWatcher.RecalledMessage right)
+        {
+            if (left.Id != right.Id || left.Content != right.Content || left.Outgoing != right.Outgoing ||
+                left.DetectedAt != right.DetectedAt) return false;
+            var a = left.Attachment;
+            var b = right.Attachment;
+            if (ReferenceEquals(a, b)) return true;
+            return a != null && b != null && a.Kind == b.Kind && a.Data == b.Data && a.Mime == b.Mime &&
+                a.PreviewData == b.PreviewData && a.PreviewMime == b.PreviewMime && a.FileName == b.FileName &&
+                a.FromSource == b.FromSource && a.CaptureStatus == b.CaptureStatus;
         }
 
         private static ControlTemplate RecallCardTemplate()

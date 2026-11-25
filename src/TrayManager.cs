@@ -166,17 +166,40 @@ namespace ZaloManagerPoc
             }
         }
 
-        public static void ExitApplication()
+        internal static bool IsExiting { get; private set; }
+
+        public static async void ExitApplication()
         {
+            if (IsExiting) return;
+            IsExiting = true;
+            try
+            {
+                await CdpMessageWatcher.StopForShutdown();
+                if (!await System.Threading.Tasks.Task.Run(() => CdpMessageWatcher.IncomingMessageCache.Flush()))
+                {
+                    IsExiting = false;
+                CdpMessageWatcher.ResumeAfterFailedShutdown();
+                    RestoreMainWindow();
+                    NoticeDialog.Show(mainWindow, "Chưa lưu được cache", "Kiểm tra dung lượng và quyền ghi rồi chọn Thoát hoàn toàn để thử lại.");
+                    return;
+                }
+            }
+            catch (Exception error)
+            {
+                Store.Log(error);
+                IsExiting = false;
+                CdpMessageWatcher.ResumeAfterFailedShutdown();
+                RestoreMainWindow();
+                NoticeDialog.Show(mainWindow, "Chưa thể thoát", "Không hoàn tất được việc lưu dữ liệu. Có thể thử thoát lại.");
+                return;
+            }
             if (notifyIcon != null)
             {
                 notifyIcon.Visible = false;
                 notifyIcon.Dispose();
                 notifyIcon = null;
             }
-            CdpMessageWatcher.StopAll();
             System.Windows.Application.Current.Shutdown();
-            Environment.Exit(0);
         }
     }
 }

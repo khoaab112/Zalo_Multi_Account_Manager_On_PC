@@ -1,5 +1,7 @@
 using System;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
+using System.Linq;
 using System.IO;
 using System.Net;
 using System.Security.Cryptography;
@@ -14,22 +16,97 @@ namespace ZaloManagerPoc
     {
         private const int MaxRecallRedirects = 5;
         private const int MaxRecallFileBytes = 64 * 1024 * 1024;
+        private static readonly RecallDownloadSlots DownloadSlots = new RecallDownloadSlots();
+        private static int activeDownloadRequests;
+
+        private sealed class RecallDownloadSlots
+        {
+            private sealed class Request
+            {
+                public string Profile;
+                public bool Small;
+                public readonly TaskCompletionSource<bool> Ready =
+                    new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            }
+
+            private readonly object gate = new object();
+            private readonly List<Request> queued = new List<Request>();
+            private readonly Dictionary<string, int> profiles = new Dictionary<string, int>();
+            private int active, large;
+
+            public async Task WaitAsync(string profile, bool small, CancellationToken token)
+            {
+                token.ThrowIfCancellationRequested();
+                var request = new Request { Profile = profile, Small = small };
+                using (token.Register(() =>
+                {
+                    lock (gate)
+                    {
+                        if (queued.Remove(request) || !request.Ready.Task.IsCompleted)
+                            request.Ready.TrySetCanceled();
+                    }
+                }))
+                {
+                    lock (gate)
+                    {
+                        if (!request.Ready.Task.IsCanceled)
+                        {
+                            queued.Add(request);
+                            Grant();
+                        }
+                    }
+                    await request.Ready.Task.ConfigureAwait(false);
+                }
+            }
+
+            public void Release(string profile, bool small)
+            {
+                lock (gate)
+                {
+                    if (--profiles[profile] == 0) profiles.Remove(profile);
+                    active--;
+                    if (!small) large--;
+                    Grant();
+                }
+            }
+
+            private int InUse(string profile)
+            {
+                int count;
+                return profiles.TryGetValue(profile, out count) ? count : 0;
+            }
+
+            private void Grant()
+            {
+                while (active < 4)
+                {
+                    var eligible = queued.Where(request => InUse(request.Profile) < 2 && (request.Small || large < 3));
+                    // Preserve a slot for small transfers, while an older large request can
+                    // use the other slots before newer small work from the same profile.
+                    var item = eligible.OrderBy(request => InUse(request.Profile)).FirstOrDefault();
+                    if (item == null) return;
+                    queued.Remove(item);
+                    profiles[item.Profile] = InUse(item.Profile) + 1;
+                    active++;
+                    if (!item.Small) large++;
+                    item.Ready.TrySetResult(true);
+                }
+            }
+        }
 
         private sealed partial class VisibleMessages
         {
             private sealed class RecallDownload
             {
-                public string Id;
+                public CapturedMessage Message;
                 public RecallAttachment Attachment;
                 public string Failure;
             }
 
-            private readonly object syncRoot = new object();
             private readonly ConcurrentQueue<RecallDownload> downloads = new ConcurrentQueue<RecallDownload>();
-            private readonly SemaphoreSlim downloadSlots = new SemaphoreSlim(8);
             private int queuedDownloads;
 
-            private void QueueRecallDownload(Profile profile, string id, CapturedMessage message, string url, bool original,
+            private void QueueRecallDownload(Profile profile, CapturedMessage message, string url, bool original,
                 string fileSize, string checksum, CancellationToken token)
             {
                 Uri uri;
@@ -40,9 +117,16 @@ namespace ZaloManagerPoc
                 string kind = message.Attachment.Kind;
                 string name = message.Content;
                 bool isSticker = kind == "sticker";
-                bool canReuse = expectedSize.HasValue || !String.IsNullOrEmpty(checksum) || !String.IsNullOrEmpty(name) || isSticker;
-                if (message.Downloading || message.Attachment.FromSource || (!webSource && !canReuse)
-                    || Volatile.Read(ref queuedDownloads) >= 128) return;
+                bool small = expectedSize.HasValue && expectedSize.Value > 0 && expectedSize.Value < 2 * 1024 * 1024;
+                bool canReuse = expectedSize.HasValue && !String.IsNullOrEmpty(checksum);
+                if (token.IsCancellationRequested || message.Downloading || message.Attachment.FromSource ||
+                    (!webSource && !canReuse && !isSticker) || Volatile.Read(ref queuedDownloads) >= 32) return;
+                if (Interlocked.Increment(ref activeDownloadRequests) > 128)
+                {
+                    Interlocked.Decrement(ref activeDownloadRequests);
+                    Status = "Hàng đợi tải tệp đã đầy";
+                    return;
+                }
 
                 message.Downloading = true;
                 Interlocked.Increment(ref queuedDownloads);
@@ -53,14 +137,15 @@ namespace ZaloManagerPoc
                     bool entered = false;
                     try
                     {
-                        await downloadSlots.WaitAsync(token);
+                        await DownloadSlots.WaitAsync(profile.Id, small, token);
                         entered = true;
+                        token.ThrowIfCancellationRequested();
                         if (expectedSize > MaxRecallFileBytes) throw new RecallMediaUnavailable("too-large");
                         if (isSticker)
                         {
                             attachment = ReadLocalSticker(fileSize, checksum, url, token);
                         }
-                        if (attachment == null && canReuse && expectedSize.HasValue)
+                        if (attachment == null && canReuse)
                         {
                             var folder = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads");
                             attachment = ReadDownloadedRecallFile(folder, name, kind, expectedSize.Value, checksum, token);
@@ -69,7 +154,18 @@ namespace ZaloManagerPoc
                             attachment = await DownloadRecallMedia(uri, kind, original, expectedSize, checksum, token);
                         if (attachment == null && !webSource) failure = "no-source";
                     }
-                    catch (RecallMediaUnavailable error) { failure = error.Message; }
+                    catch (RecallMediaUnavailable error)
+                    {
+                        failure = error.Message;
+                        if (kind == "file" && failure.StartsWith("redirect-", StringComparison.Ordinal))
+                        {
+                            string diagnostic = "Recall file download: " + failure;
+                            if (!String.IsNullOrEmpty(error.RedirectHost)) diagnostic += " (host " + error.RedirectHost + ")";
+                            try { Store.Log(new IOException(diagnostic)); }
+                            catch (IOException) { }
+                            catch (UnauthorizedAccessException) { }
+                        }
+                    }
                     catch (WebException error)
                     {
                         var response = error.Response as HttpWebResponse;
@@ -85,16 +181,20 @@ namespace ZaloManagerPoc
                     }
                     catch (IOException) { failure = "incomplete"; }
                     catch (OperationCanceledException) { failure = "interrupted"; }
+                    catch (UnauthorizedAccessException) { failure = "storage"; }
                     finally
                     {
-                        downloads.Enqueue(new RecallDownload { Id = id, Attachment = attachment, Failure = failure });
-                        if (entered) downloadSlots.Release();
-                        Interlocked.Decrement(ref queuedDownloads);
-                        if (profile != null)
+                        var result = new RecallDownload { Message = message, Attachment = attachment, Failure = failure };
+                        bool accepted = false;
+                        if (!token.IsCancellationRequested)
                         {
-                            try { ApplyRecallDownloads(profile); }
-                            catch { }
+                            if (PostDownload != null) accepted = PostDownload(() => downloads.Enqueue(result));
+                            else { downloads.Enqueue(result); accepted = true; }
                         }
+                        if (!accepted) DeleteStagedMedia(attachment);
+                        if (entered) DownloadSlots.Release(profile.Id, small);
+                        Interlocked.Decrement(ref queuedDownloads);
+                        Interlocked.Decrement(ref activeDownloadRequests);
                     }
                 });
             }
@@ -103,43 +203,48 @@ namespace ZaloManagerPoc
             {
                 if (profile == null) return;
                 RecallDownload result;
-                bool anyChanged = false;
                 while (downloads.TryDequeue(out result))
                 {
-                    CapturedMessage message;
-                    lock (syncRoot)
-                    {
-                        if (!captured.TryGetValue(result.Id, out message)) continue;
-                    }
+                    var message = result.Message;
                     message.Downloading = false;
-                    if (message.Attachment.FromSource) continue;
-                    if (result.Attachment == null)
+                    try
                     {
-                        if (!String.IsNullOrEmpty(message.Attachment.Data)) continue;
-                        message.Attachment.CaptureStatus = result.Failure;
-                        IncomingMessageCache.UpdateAttachment(result.Id, message.Attachment);
-                        if (message.Recalled && UpdateRecallAttachmentCore(profile.Id, message.ConversationId, result.Id, message.Attachment))
-                            anyChanged = true;
-                        continue;
+                        if (!IsRecallEnabled(profile.Id) || message.Attachment.FromSource ||
+                            (message.Cached.GroupExpires.HasValue && message.Cached.GroupExpires.Value <= DateTimeOffset.UtcNow)) continue;
+                        var attachment = result.Attachment;
+                        if (attachment == null)
+                        {
+                            if (!String.IsNullOrEmpty(message.Attachment.Data)) continue;
+                            var unavailable = message.Attachment.Clone();
+                            unavailable.CaptureStatus = result.Failure;
+                            ApplyAttachment(profile, message, unavailable);
+                            continue;
+                        }
+
+                        if (String.IsNullOrEmpty(attachment.PreviewData))
+                        {
+                            attachment.PreviewData = message.Attachment.PreviewData ?? message.Attachment.Data;
+                            attachment.PreviewMime = message.Attachment.PreviewMime ?? message.Attachment.Mime;
+                        }
+                        if (String.IsNullOrEmpty(attachment.FileName)) attachment.FileName = message.Attachment.FileName;
+                        var publishing = new List<string>();
+                        try
+                        {
+                            lock (RecallMediaGate)
+                            {
+                                PublishStagedMedia(attachment);
+                                ProtectPublishedMedia(attachment, publishing);
+                            }
+                            ApplyAttachment(profile, message, attachment);
+                        }
+                        finally { ReleasePublishingMedia(publishing); }
                     }
-                    var attachment = result.Attachment;
-                    if (String.IsNullOrEmpty(attachment.PreviewData))
+                    catch (Exception error)
                     {
-                        attachment.PreviewData = message.Attachment.Data;
-                        attachment.PreviewMime = message.Attachment.Mime;
+                        if (!IsRecallStorageError(error)) throw;
+                        Status = "Chưa lưu được tệp thu hồi";
                     }
-                    if (String.IsNullOrEmpty(attachment.FileName))
-                    {
-                        attachment.FileName = message.Attachment.FileName;
-                    }
-                    message.Attachment = attachment;
-                    IncomingMessageCache.UpdateAttachment(result.Id, attachment);
-                    if (message.Recalled && UpdateRecallAttachmentCore(profile.Id, message.ConversationId, result.Id, attachment))
-                        anyChanged = true;
-                }
-                if (anyChanged)
-                {
-                    CommitRecallChanges();
+                    finally { DeleteStagedMedia(result.Attachment); }
                 }
             }
         }
@@ -158,17 +263,34 @@ namespace ZaloManagerPoc
 
         private sealed class RecallMediaUnavailable : Exception
         {
-            public RecallMediaUnavailable(string code) : base(code) { }
+            public readonly string RedirectHost;
+            public RecallMediaUnavailable(string code, string redirectHost = null) : base(code) { RedirectHost = redirectHost; }
         }
 
         private static Uri RecallRedirectTarget(Uri source, int status, string location, int redirectsFollowed)
         {
             if (status != 301 && status != 302 && status != 303 && status != 307 && status != 308) return null;
             if (redirectsFollowed >= MaxRecallRedirects) throw new RecallMediaUnavailable("redirect-limit");
+            if (String.IsNullOrWhiteSpace(location)) throw new RecallMediaUnavailable("redirect-missing-location");
             Uri target;
-            if (String.IsNullOrWhiteSpace(location) || !Uri.TryCreate(source, location, out target) || !IsRecallMediaUri(target))
-                throw new RecallMediaUnavailable("redirect-blocked");
+            if (!Uri.TryCreate(source, location, out target)) throw new RecallMediaUnavailable("redirect-invalid-location");
+            if (!IsRecallMediaUri(target) && !IsObservedFileCdnRedirect(source, target))
+                throw new RecallMediaUnavailable("redirect-policy", target.HostNameType == UriHostNameType.Dns ? target.IdnHost : null);
             return target;
+        }
+
+        private static bool IsObservedFileCdnRedirect(Uri source, Uri target)
+        {
+            // Only permit the HTTPS hops verified on the live ZIP, including the transition to its regional edge.
+            if (source.Scheme != Uri.UriSchemeHttps || !source.IsDefaultPort || source.UserInfo.Length != 0 ||
+                target.Scheme != Uri.UriSchemeHttps || !target.IsDefaultPort || target.UserInfo.Length != 0)
+                return false;
+            string from = source.IdnHost;
+            string to = target.IdnHost;
+            return (String.Equals(from, "file-stal-17.dlfl.vn", StringComparison.OrdinalIgnoreCase) &&
+                    String.Equals(to, "file-stal-17.flchat.vn", StringComparison.OrdinalIgnoreCase)) ||
+                   (String.Equals(from, "file-stal-17.flchat.vn", StringComparison.OrdinalIgnoreCase) &&
+                    String.Equals(to, "file-stal-17-te-vnno-ne-6.flchat.vn", StringComparison.OrdinalIgnoreCase));
         }
 
         private static RecallAttachment ReadDownloadedRecallFile(string folder, string name, string kind,
@@ -201,27 +323,17 @@ namespace ZaloManagerPoc
                     {
                         if (input.Length != expectedSize) continue;
                         if (input.Length <= 0 || input.Length > MaxRecallFileBytes) continue;
-                        token.ThrowIfCancellationRequested();
-                        var bytes = new byte[(int)input.Length];
-                        int offset = 0;
-                        while (offset < bytes.Length)
-                        {
-                            int read = input.Read(bytes, offset, bytes.Length - offset);
-                            if (read == 0) break;
-                            offset += read;
-                        }
-                        if (offset != bytes.Length) continue;
-                        if (!String.IsNullOrEmpty(checksum) && !MatchesRecallChecksum(bytes, checksum)) continue;
-                        return new RecallAttachment
-                        {
-                            Kind = kind, FileName = name, Data = Convert.ToBase64String(bytes),
-                            Mime = kind == "video" ? "video/mp4" : null,
-                            FromSource = true, Origin = "local"
-                        };
+                        if (String.IsNullOrEmpty(checksum)) continue;
+                        var copy = StageMedia(input, kind, true, input.Length, expectedSize, checksum,
+                            kind == "video" ? "video/mp4" : null, token).GetAwaiter().GetResult();
+                        copy.FileName = name;
+                        copy.Origin = "local";
+                        return copy;
                     }
                 }
                 catch (IOException) { }
                 catch (UnauthorizedAccessException) { }
+                catch (RecallMediaUnavailable) { }
             }
             return null;
         }
@@ -254,29 +366,24 @@ namespace ZaloManagerPoc
                             var files = Directory.GetFiles(sDir, "*.png");
                             if (files.Length > 0)
                             {
-                                return new RecallAttachment
+                                var source = files[0];
+                                using (var input = new FileStream(source, FileMode.Open, FileAccess.Read, FileShare.Read))
                                 {
-                                    Kind = "sticker",
-                                    FileName = Path.GetFileName(files[0]),
-                                    Data = "local:" + files[0],
-                                    Mime = "image/png",
-                                    FromSource = true,
-                                    Origin = "local"
-                                };
+                                    var sticker = StageMedia(input, "sticker", true, input.Length, null, null, "image/png",
+                                        token).GetAwaiter().GetResult();
+                                    sticker.FileName = Path.GetFileName(source);
+                                    sticker.Origin = "local";
+                                    return sticker;
+                                }
                             }
                         }
                     }
                 }
             }
-            catch { }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+            catch (RecallMediaUnavailable) { }
             return null;
-        }
-
-        private static bool MatchesRecallChecksum(byte[] bytes, string checksum)
-        {
-            if (String.IsNullOrEmpty(checksum)) return true;
-            using (HashAlgorithm digest = checksum.Length == 64 ? (HashAlgorithm)SHA256.Create() : MD5.Create())
-                return String.Equals(BitConverter.ToString(digest.ComputeHash(bytes)).Replace("-", ""), checksum, StringComparison.OrdinalIgnoreCase);
         }
 
         private static string RecallPictureMime(byte[] bytes)
@@ -315,98 +422,153 @@ namespace ZaloManagerPoc
             }
             using (var timeout = CancellationTokenSource.CreateLinkedTokenSource(token))
             {
-                timeout.CancelAfter(8000);
-                for (int redirects = 0; ; redirects++)
+                timeout.CancelAfter(90000);
+                try
                 {
-                    timeout.Token.ThrowIfCancellationRequested();
-                    var request = (HttpWebRequest)WebRequest.Create(uri);
-                    request.AllowAutoRedirect = false;
-                    request.UseDefaultCredentials = false;
-                    request.Proxy = null;
-                    request.UserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36";
-                    request.Referer = "https://chat.zalo.me/";
-                    using (timeout.Token.Register(request.Abort))
-                    using (var response = (HttpWebResponse)await request.GetResponseAsync())
+                    for (int redirects = 0; ; redirects++)
                     {
-                        int status = (int)response.StatusCode;
-                        var target = RecallRedirectTarget(uri, status, response.Headers[HttpResponseHeader.Location], redirects);
-                        if (target != null) { uri = target; continue; }
-                        if (status != 200) throw new RecallMediaUnavailable("http-" + status);
-                        return await ReadRecallDownload(response, kind, original, expectedSize, checksum, timeout.Token);
+                        timeout.Token.ThrowIfCancellationRequested();
+                        var request = (HttpWebRequest)WebRequest.Create(uri);
+                        request.AllowAutoRedirect = false;
+                        request.UseDefaultCredentials = false;
+                        request.Proxy = null;
+                        request.UserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36";
+                        request.Referer = "https://chat.zalo.me/";
+                        using (var headers = CancellationTokenSource.CreateLinkedTokenSource(timeout.Token))
+                        using (headers.Token.Register(request.Abort))
+                        using (timeout.Token.Register(request.Abort))
+                        using (var response = await ReceiveRecallHeaders(request, headers, timeout.Token))
+                        {
+                            int status = (int)response.StatusCode;
+                            var target = RecallRedirectTarget(uri, status, response.Headers[HttpResponseHeader.Location], redirects);
+                            if (target != null) { uri = target; continue; }
+                            if (status != 200) throw new RecallMediaUnavailable("http-" + status);
+                            return await ReadRecallDownload(response, kind, original, expectedSize, checksum, timeout.Token, request.Abort);
+                        }
                     }
+                }
+                catch (Exception error)
+                {
+                    if (token.IsCancellationRequested) token.ThrowIfCancellationRequested();
+                    if (timeout.IsCancellationRequested &&
+                        (error is OperationCanceledException || error is WebException || error is IOException))
+                        throw new RecallMediaUnavailable("total-timeout");
+                    throw;
                 }
             }
         }
 
+        private static async Task<HttpWebResponse> ReceiveRecallHeaders(HttpWebRequest request, CancellationTokenSource headers,
+            CancellationToken total)
+        {
+            headers.CancelAfter(10000);
+            try { return (HttpWebResponse)await request.GetResponseAsync(); }
+            catch (WebException)
+            {
+                if (headers.IsCancellationRequested && !total.IsCancellationRequested)
+                    throw new RecallMediaUnavailable("headers-timeout");
+                throw;
+            }
+            finally { headers.CancelAfter(Timeout.Infinite); }
+        }
+
         private static async Task<RecallAttachment> ReadRecallDownload(HttpWebResponse response, string kind, bool original,
-            long? expectedSize, string checksum, CancellationToken token)
+            long? expectedSize, string checksum, CancellationToken token, Action abort)
         {
             if (response.ContentLength > MaxRecallFileBytes) throw new RecallMediaUnavailable("too-large");
             string mime = (response.ContentType ?? "").Split(';')[0].Trim().ToLowerInvariant();
             if ((kind != "file" || String.IsNullOrEmpty(checksum))
                 && (mime == "text/html" || mime == "application/xhtml+xml" || mime == "application/json")) throw new RecallMediaUnavailable("wrong-type");
             if (kind == "video" && !mime.StartsWith("video/", StringComparison.Ordinal) && mime != "application/octet-stream") throw new RecallMediaUnavailable("wrong-type");
-            bool picture = kind == "image" || kind == "sticker" || kind == "contact";
-
             using (var input = response.GetResponseStream())
-            using (var body = new MemoryStream())
+                return await StageMedia(input, kind, original, response.ContentLength, expectedSize, checksum, mime, token, abort);
+        }
+
+        private static async Task<RecallAttachment> StageMedia(Stream input, string kind, bool original,
+            long declaredSize, long? expectedSize, string checksum, string mime, CancellationToken token, Action abort = null)
+        {
+            Directory.CreateDirectory(RecallStagingDir);
+            string stage = Path.Combine(RecallStagingDir, Guid.NewGuid().ToString("N") + ".part");
+            ActiveStagedMedia.TryAdd(stage, 0);
+            bool complete = false;
+            try
             {
                 var buffer = new byte[64 * 1024];
-                int length;
-                while ((length = await input.ReadAsync(buffer, 0, buffer.Length, token)) != 0)
+                var header = new byte[12];
+                int headerLength = 0;
+                long total = 0;
+                using (HashAlgorithm hash = String.IsNullOrEmpty(checksum) ? null :
+                    checksum.Length == 64 ? (HashAlgorithm)SHA256.Create() : MD5.Create())
+                using (var output = new FileStream(stage, FileMode.CreateNew, FileAccess.Write, FileShare.None, buffer.Length, true))
+                using (var idle = abort == null ? null : CancellationTokenSource.CreateLinkedTokenSource(token))
+                using (idle == null ? default(CancellationTokenRegistration) : idle.Token.Register(abort))
                 {
-                    if (body.Length + length > MaxRecallFileBytes) throw new RecallMediaUnavailable("too-large");
-                    body.Write(buffer, 0, length);
-                }
-                if (body.Length == 0 || (response.ContentLength >= 0 && body.Length != response.ContentLength)) return null;
-                var bytes = body.ToArray();
-                if ((expectedSize.HasValue && bytes.LongLength != expectedSize.Value) || !MatchesRecallChecksum(bytes, checksum))
-                    throw new RecallMediaUnavailable("checksum-mismatch");
-                if (picture)
-                {
-                    mime = RecallPictureMime(bytes);
-                    if (mime == null) throw new RecallMediaUnavailable("wrong-type");
-                }
-                if (kind == "audio")
-                {
-                    mime = RecallAudioMime(bytes) ?? mime;
-                    if (String.IsNullOrEmpty(mime) || mime == "application/octet-stream") mime = "audio/aac";
-                    if (!mime.StartsWith("audio/", StringComparison.Ordinal)) throw new RecallMediaUnavailable("wrong-type");
-                }
-                if (kind == "video" && (String.IsNullOrEmpty(mime) || mime == "application/octet-stream"))
-                {
-                    mime = "video/mp4";
-                }
-                string mediaData;
-                bool saveToDisk = kind == "video" || kind == "audio" || kind == "file" || bytes.Length > 200 * 1024;
-                if (saveToDisk)
-                {
-                    try
+                    int length;
+                    while ((length = await ReadMediaChunk(input, buffer, idle, token).ConfigureAwait(false)) != 0)
                     {
-                        Directory.CreateDirectory(RecallMediaDir);
-                        string ext = ".bin";
-                        if (kind == "video") ext = ".mp4";
-                        else if (kind == "audio") ext = (mime ?? "").Contains("wav") ? ".wav" : ((mime ?? "").Contains("ogg") ? ".ogg" : ".m4a");
-                        else if (kind == "image") ext = (mime ?? "").Contains("png") ? ".png" : ((mime ?? "").Contains("gif") ? ".gif" : ((mime ?? "").Contains("webp") ? ".webp" : ".jpg"));
-                        string filePath = Path.Combine(RecallMediaDir, Guid.NewGuid().ToString("N") + ext);
-                        File.WriteAllBytes(filePath, bytes);
-                        mediaData = "local:" + filePath;
+                        total += length;
+                        if (total > MaxRecallFileBytes) throw new RecallMediaUnavailable("too-large");
+                        int copy = Math.Min(header.Length - headerLength, length);
+                        Array.Copy(buffer, 0, header, headerLength, copy);
+                        headerLength += copy;
+                        if (hash != null) hash.TransformBlock(buffer, 0, length, null, 0);
+                        await output.WriteAsync(buffer, 0, length, token).ConfigureAwait(false);
                     }
-                    catch
+                    if (total == 0 || (declaredSize >= 0 && total != declaredSize))
+                        throw new RecallMediaUnavailable("incomplete");
+                    if (expectedSize.HasValue && total != expectedSize.Value)
+                        throw new RecallMediaUnavailable("size-mismatch");
+                    if (hash != null)
                     {
-                        mediaData = Convert.ToBase64String(bytes);
+                        hash.TransformFinalBlock(buffer, 0, 0);
+                        if (!String.Equals(BitConverter.ToString(hash.Hash).Replace("-", ""), checksum, StringComparison.OrdinalIgnoreCase))
+                            throw new RecallMediaUnavailable("checksum-mismatch");
                     }
+                    if (kind == "image" || kind == "sticker" || kind == "contact")
+                    {
+                        mime = headerLength == header.Length ? RecallPictureMime(header) : null;
+                        if (mime == null) throw new RecallMediaUnavailable("wrong-type");
+                    }
+                    if (kind == "audio")
+                    {
+                        mime = (headerLength == header.Length ? RecallAudioMime(header) : null) ?? mime;
+                        if (String.IsNullOrEmpty(mime) || mime == "application/octet-stream") mime = "audio/aac";
+                        if (!mime.StartsWith("audio/", StringComparison.Ordinal)) throw new RecallMediaUnavailable("wrong-type");
+                    }
+                    if (kind == "video" && (String.IsNullOrEmpty(mime) || mime == "application/octet-stream")) mime = "video/mp4";
+                    token.ThrowIfCancellationRequested();
+                    output.Flush(true);
                 }
-                else
-                {
-                    mediaData = Convert.ToBase64String(bytes);
-                }
+                complete = true;
                 return new RecallAttachment
                 {
-                    Kind = kind, Data = mediaData, Mime = mime,
+                    Kind = kind, StagedPath = stage, Mime = mime,
                     FromSource = (kind != "image" && kind != "contact") || original, Origin = "cdn"
                 };
             }
+            finally
+            {
+                if (!complete) DeleteStagedFile(stage);
+            }
+        }
+
+        private static async Task<int> ReadMediaChunk(Stream input, byte[] buffer, CancellationTokenSource idle, CancellationToken token)
+        {
+            if (idle != null) idle.CancelAfter(10000);
+            try
+            {
+                int bytes = await input.ReadAsync(buffer, 0, buffer.Length, idle == null ? token : idle.Token).ConfigureAwait(false);
+                if (idle != null) idle.Token.ThrowIfCancellationRequested();
+                return bytes;
+            }
+            catch (Exception error)
+            {
+                if (idle != null && idle.IsCancellationRequested && !token.IsCancellationRequested &&
+                    (error is OperationCanceledException || error is WebException || error is IOException))
+                    throw new RecallMediaUnavailable("idle-timeout");
+                throw;
+            }
+            finally { if (idle != null) idle.CancelAfter(Timeout.Infinite); }
         }
     }
 }

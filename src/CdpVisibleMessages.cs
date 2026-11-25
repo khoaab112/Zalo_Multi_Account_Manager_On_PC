@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text;
+using System.Threading;
 using System.Web.Script.Serialization;
 
 namespace ZaloManagerPoc
@@ -30,14 +31,45 @@ namespace ZaloManagerPoc
                 public int NextChunk;
                 public bool Downloading;
                 public string ConversationId;
-                public string ConversationName;
-                public string AvatarPng;
+                public string PreviousConversation;
                 public bool Outgoing;
                 public bool Recalled;
+                public string Id;
+                public string CliId;
+                public string RecallId;
+                public DateTimeOffset Timestamp;
+                public CachedIncomingMessage Cached;
+                public bool AttachmentDirty;
+                public string PinnedMedia;
             }
 
-            private readonly Dictionary<string, CapturedMessage> captured = new Dictionary<string, CapturedMessage>();
-            public volatile string Status = "Đang kiểm tra hội thoại Zalo";
+            private sealed class PendingUndo
+            {
+                public string Id, CliId, Conversation;
+                public DateTimeOffset Due;
+                public bool AwaitingScope;
+            }
+
+            private readonly Dictionary<Tuple<string, string>, CapturedMessage> captured =
+                new Dictionary<Tuple<string, string>, CapturedMessage>();
+            private readonly List<PendingUndo> pending = new List<PendingUndo>();
+            private readonly HashSet<string> provisionalRecalls = new HashSet<string>();
+            private DateTimeOffset nextMaintenance;
+            private bool retryPendingOnStart = true;
+            private bool retryPending;
+            public Func<Action, bool> PostDownload;
+
+            public int PendingTimeout
+            {
+                get
+                {
+                    if (retryPending || retryPendingOnStart || captured.Values.Any(item => item.AttachmentDirty))
+                        return 1000;
+                    if (pending.Any(item => item.AwaitingScope)) return 1000;
+                    return captured.Count == 0 && pending.Count == 0 ? Timeout.Infinite : 60000;
+                }
+            }
+            public volatile string Status = "Đang chờ sự kiện Zalo";
             public volatile bool ConversationOpen;
 
             private const string Query = @"(function(key, readMessage) {
@@ -213,9 +245,12 @@ const title = document.querySelector('#header .header-title');
                 return result;
             })";
 
-            public string CreateHookScript(JavaScriptSerializer json)
+            public string CreateHookScript(JavaScriptSerializer json, string bindingSession)
             {
                 return @"(function() {
+    if (window !== window.top) return;
+    const session = " + json.Serialize(bindingSession) + @";
+    if (window.__zaloRecallHook) window.__zaloRecallHook.stop();
     try {
         if (window.__zaloManagerV4Interval) clearInterval(window.__zaloManagerV4Interval);
         if (window.__zaloManagerWatcher && window.__zaloManagerWatcher.observer) {
@@ -228,12 +263,49 @@ const title = document.querySelector('#header .header-title');
         delete window.__zaloManagerVisibleMessages;
     } catch (e) {}
 
-    const avatarCache = window.__zaloAvatarCache || (window.__zaloAvatarCache = new Map());
+    const avatarCache = new Map();
+    const wrappers = new Map();
+    const knownConversations = new WeakMap();
+    const announcedAvatars = new Map();
+    let active = true;
+    let ready = false;
+    let retry;
+    const hook = { session: session, stop: function() {
+        active = false;
+        clearInterval(retry);
+        wrappers.forEach(function(item) {
+            if (item.target[item.key] === item.wrapped) item.target[item.key] = item.original;
+        });
+        if (window.__zaloRecallHook === hook) delete window.__zaloRecallHook;
+    }};
+    window.__zaloRecallHook = hook;
+
+    function watch(role, target, key, callback) {
+        const prior = wrappers.get(role);
+        if (prior && prior.target === target && target[key] === prior.wrapped) return true;
+        if (prior) {
+            if (prior.target[prior.key] === prior.wrapped) prior.target[prior.key] = prior.original;
+            wrappers.delete(role);
+        }
+        if (!target || typeof target[key] !== 'function') return false;
+        const original = target[key];
+        const wrapped = function() {
+            if (active) try { callback.apply(this, arguments); } catch (e) {}
+            return original.apply(this, arguments);
+        };
+        target[key] = wrapped;
+        if (target[key] !== wrapped) return false;
+        wrappers.set(role, { target: target, key: key, original: original, wrapped: wrapped });
+        return true;
+    }
+
+    function send(payload) {
+        if (!active || typeof window.__zaloManagerDispatch !== 'function') return false;
+        try { window.__zaloManagerDispatch(session + ':' + payload); return true; } catch (e) { return false; }
+    }
 
     function emit(data) {
-        if (typeof window.__zaloManagerDispatch === 'function') {
-            try { window.__zaloManagerDispatch(JSON.stringify(data)); } catch (e) {}
-        }
+        if (ready) send(JSON.stringify(data));
     }
 
     function renderImageToPng(url, callback) {
@@ -296,6 +368,7 @@ const title = document.querySelector('#header .header-title');
                 canvas.width = canvas.height = 48;
                 canvas.getContext('2d').drawImage(img, 0, 0, 48, 48);
                 const b64 = canvas.toDataURL('image/png').slice('data:image/png;base64,'.length);
+                if (avatarCache.size >= 128) avatarCache.delete(avatarCache.keys().next().value);
                 avatarCache.set(url, b64);
                 if (callback) callback(b64);
             } catch (e) {}
@@ -356,30 +429,36 @@ const title = document.querySelector('#header .header-title');
         return {};
     }
 
-    function getPreviewManager() {
+    function getConversationController() {
         try {
-            if (window.uiController) {
-                const cdm = window.uiController.convDataManager;
-                if (cdm && cdm._pm && typeof cdm._pm.onReceiveNewMessage === 'function') return cdm._pm;
-            }
+            if (window.uiController && window.uiController.convDataManager) return window.uiController;
             const list = document.querySelector('#conversationList');
-            if (list) {
-                const reactKey = Object.keys(list).find(k => k.startsWith('__react'));
-                let curr = list[reactKey];
-                while (curr) {
-                    if (curr.memoizedProps && curr.memoizedProps.uiController) {
-                        const uic = curr.memoizedProps.uiController;
-                        if (uic.convDataManager && uic.convDataManager._pm) return uic.convDataManager._pm;
-                    }
-                    curr = curr.return;
-                }
+            if (!list) return null;
+            const key = Object.keys(list).find(k => k.startsWith('__react'));
+            for (let curr = list[key]; curr; curr = curr.return) {
+                const controller = curr.memoizedProps && curr.memoizedProps.uiController;
+                if (controller && controller.convDataManager) return controller;
             }
         } catch (e) {}
         return null;
     }
 
-    function handlePmMessageReceived(msg) {
-        if (!msg) return;
+    function messageDirection(msg, self) {
+        const sender = String(msg.fromUid ?? msg.uidFrom ?? '');
+        if (msg.outgoing === true || sender === '0' || (self && sender === self)) return true;
+        if (msg.outgoing === false || (self && sender)) return false;
+        return null;
+    }
+
+    function isGroupConversation(cdm, id) {
+        if (!id) return false;
+        try { return cdm?.getConvByIdSync?.(id)?.isGroup === true; }
+        catch (e) { return false; }
+    }
+
+    function handlePmMessageReceived(msg, conversationId, self, cdm) {
+        if (!msg || typeof msg !== 'object') return;
+        if (!conversationId && knownConversations.has(msg)) return;
         const id = String(msg.msgId || msg.id || '');
         const cliMsgId = String(msg.cliMsgId || '');
         if (!id && !cliMsgId) return;
@@ -387,9 +466,13 @@ const title = document.querySelector('#header .header-title');
 
         const toUid = String(msg.toUid || msg.idTo || msg.convId || '');
         const fromUid = String(msg.fromUid || msg.uidFrom || '');
-        const isOut = fromUid === '0';
-        const convId = isOut ? toUid : (fromUid && fromUid !== '0' ? fromUid : toUid);
+        const isOut = messageDirection(msg, self);
+        if (isOut === null) return;
+        const proposedGroup = !conversationId && !msg.convId && isGroupConversation(cdm, toUid) ? toUid : '';
+        const explicitConversation = String(conversationId || msg.convId || proposedGroup || '');
+        const convId = explicitConversation || (isOut ? toUid : (fromUid && fromUid !== '0' ? fromUid : toUid));
         if (!convId) return;
+        const isGroup = msg.isGroup === true || !!proposedGroup || isGroupConversation(cdm, convId);
 
         let text = typeof msg.message === 'string' ? msg.message : '';
         let kind = null;
@@ -418,7 +501,7 @@ const title = document.querySelector('#header .header-title');
                         params: child.params || params
                     });
                     delete subMsg.message.childMsgs;
-                    handlePmMessageReceived(subMsg);
+                    handlePmMessageReceived(subMsg, conversationId, self, cdm);
                 }
             }
         }
@@ -468,7 +551,7 @@ const title = document.querySelector('#header .header-title');
             fileSize = String((params && params.fileSize) || msgObj.fileSize || '');
         } else if (isVideo) {
             kind = 'video';
-            text = potentialFileName || (typeof msgObj.title === 'string' && msgObj.title) ? msgObj.title : (text || 'Video');
+            text = potentialFileName || text || 'Video';
             source = msgObj.videoUrl || msgObj.oriUrl || props.videoUrl || props.oriUrl || props.fileUrl || props.url || params.videoUrl || params.url || params.oriUrl || msgObj.href || params.fileUrl || msgObj.url || msg.videoUrl || msg.href || '';
             fileSize = String(msgObj.fileSize || params.fileSize || props.fileSize || '');
             checksum = String(msgObj.checksum || params.checksum || props.checksum || '');
@@ -492,7 +575,8 @@ const title = document.querySelector('#header .header-title');
 
         const info = getContactInfo(convId) || {};
         const convName = info.name || '';
-        const ava = avatarCache.get(info.avatar) || '';
+        const ava = announcedAvatars.get(convId) !== info.avatar ? (avatarCache.get(info.avatar) || '') : '';
+        if (ava) rememberAvatar(convId, info.avatar);
         const primaryId = id || cliMsgId;
 
         emit([{
@@ -501,6 +585,8 @@ const title = document.querySelector('#header .header-title');
             outgoing: isOut,
             preview: (text || 'Tin nhắn').slice(0, 16000),
             conversation: convId,
+            provisionalConversation: !explicitConversation,
+            isGroup: isGroup,
             name: convName,
             kind: kind,
             source: source,
@@ -513,7 +599,8 @@ const title = document.querySelector('#header .header-title');
 
         if (info.avatar && !avatarCache.has(info.avatar)) {
             loadAvatarPng(info.avatar, function(b64) {
-                emit([{ id: primaryId, cliMsgId: cliMsgId, avatarUpdate: true, avatar: b64 }]);
+                rememberAvatar(convId, info.avatar);
+                emit([{ id: primaryId, cliMsgId: cliMsgId, conversation: convId, avatarUpdate: true, avatar: b64 }]);
             });
         }
 
@@ -522,11 +609,12 @@ const title = document.querySelector('#header .header-title');
                 emit([{
                     id: primaryId,
                     cliMsgId: cliMsgId,
+                    conversation: convId,
                     kind: kind,
                     mediaUpdate: true,
                     media: pngB64,
                     mime: 'image/png',
-                    fromSource: true
+                    fromSource: false
                 }]);
             });
         } else if (kind === 'video' && thumbUrl) {
@@ -534,6 +622,7 @@ const title = document.querySelector('#header .header-title');
                 emit([{
                     id: primaryId,
                     cliMsgId: cliMsgId,
+                    conversation: convId,
                     kind: 'video',
                     mediaUpdate: true,
                     previewOnly: true,
@@ -542,6 +631,11 @@ const title = document.querySelector('#header .header-title');
                 }]);
             });
         }
+    }
+
+    function rememberAvatar(conversation, url) {
+        if (announcedAvatars.size >= 1024) announcedAvatars.delete(announcedAvatars.keys().next().value);
+        announcedAvatars.set(conversation, url);
     }
 
     const seenRecalls = new Set();
@@ -567,168 +661,43 @@ const title = document.querySelector('#header .header-title');
         }]);
     }
 
-    function handlePmMessageUndo(msg) {
-        if (!msg) return;
+    function handlePmMessageUndo(msg, self) {
+        if (!msg || messageDirection(msg, self) === true) return;
         const id = String(msg.msgId || msg.id || '');
         const cliMsgId = String(msg.cliMsgId || '');
-        const toUid = String(msg.toUid || msg.idTo || msg.convId || '');
-        const fromUid = String(msg.fromUid || msg.uidFrom || '');
-        const convId = toUid || fromUid || '';
+        const convId = String(msg.convId || (typeof msg === 'object' && knownConversations.get(msg)) || '');
         reportUndo(id, cliMsgId, convId);
     }
 
     function setupPmHooks() {
-        const pm = getPreviewManager();
-        if (!pm) return false;
-        pm.__zaloManagerHandleReceived = handlePmMessageReceived;
-        pm.__zaloManagerHandleUndo = handlePmMessageUndo;
-        if (pm.__zaloManagerHookedDispatch) return true;
-        pm.__zaloManagerHookedDispatch = true;
+        const controller = getConversationController();
+        const cdm = controller && controller.convDataManager;
+        const pm = cdm && cdm._pm;
+        const self = () => String(controller?.currUser?.userId ?? '');
+        let hasReceive = watch('receive', pm, 'onReceiveNewMessage', function(src, msg) {
+            handlePmMessageReceived(msg, null, self(), cdm);
+        });
+        watch('receiveBatch', pm, 'onReceiveNewMessages', function(src, list) {
+            if (Array.isArray(list)) list.forEach(m => handlePmMessageReceived(m, null, self(), cdm));
+        });
+        const hasUndo = watch('undo', pm, 'onUndoMessage', function(src, msg) { handlePmMessageUndo(msg, self()); });
 
-        const origOnReceive = pm.onReceiveNewMessage;
-        pm.onReceiveNewMessage = function(src, msg) {
-            try {
-                if (msg && typeof pm.__zaloManagerHandleReceived === 'function')
-                    pm.__zaloManagerHandleReceived(msg);
-            } catch (e) {}
-            return origOnReceive.apply(this, arguments);
-        };
-
-        if (typeof pm.onReceiveNewMessages === 'function') {
-            const origBatch = pm.onReceiveNewMessages;
-            pm.onReceiveNewMessages = function(src, list) {
-                try {
-                    if (Array.isArray(list) && typeof pm.__zaloManagerHandleReceived === 'function')
-                        list.forEach(m => pm.__zaloManagerHandleReceived(m));
-                } catch (e) {}
-                return origBatch.apply(this, arguments);
-            };
-        }
-
-        const origOnUndo = pm.onUndoMessage;
-        pm.onUndoMessage = function(src, msg) {
-            try {
-                if (msg && typeof pm.__zaloManagerHandleUndo === 'function')
-                    pm.__zaloManagerHandleUndo(msg);
-            } catch (e) {}
-            return origOnUndo.apply(this, arguments);
-        };
-
-        if (typeof pm.onDeleteMessage === 'function') {
-            const origOnDelete = pm.onDeleteMessage;
-            pm.onDeleteMessage = function(src, msg) {
-                try {
-                    if (msg && typeof pm.__zaloManagerHandleUndo === 'function')
-                        pm.__zaloManagerHandleUndo(msg);
-                } catch (e) {}
-                return origOnDelete.apply(this, arguments);
-            };
-        }
-
-        if (typeof pm.onDeleteMessages === 'function') {
-            const origOnDeleteMsgs = pm.onDeleteMessages;
-            pm.onDeleteMessages = function(src, list) {
-                try {
-                    if (Array.isArray(list) && typeof pm.__zaloManagerHandleUndo === 'function') {
-                        list.forEach(m => pm.__zaloManagerHandleUndo(m));
-                    }
-                } catch (e) {}
-                return origOnDeleteMsgs.apply(this, arguments);
-            };
-        }
-
-        try {
-            const list = document.querySelector('#conversationList');
-            let uic = window.uiController;
-            if (!uic && list) {
-                const rKey = Object.keys(list).find(k => k.startsWith('__react'));
-                let curr = list[rKey];
-                while (curr) {
-                    if (curr.memoizedProps && curr.memoizedProps.uiController) {
-                        uic = curr.memoizedProps.uiController;
-                        break;
-                    }
-                    curr = curr.return;
+        hasReceive = watch('conversationBatch', cdm, 'onReceiveNewMessages', function(convId, msgs) {
+            if (Array.isArray(msgs)) msgs.forEach(m => {
+                if (m && typeof m === 'object' && convId != null && String(convId) !== '') {
+                    if (knownConversations.get(m) === convId) return;
+                    handlePmMessageReceived(m, convId, self(), cdm);
+                    knownConversations.set(m, convId);
                 }
-            }
-            const cdm = uic && uic.convDataManager;
-            if (cdm) {
-                if (typeof cdm.onDeleteMessages === 'function' && !cdm.__zaloManagerHookedDelete) {
-                    cdm.__zaloManagerHookedDelete = true;
-                    const origDelete = cdm.onDeleteMessages;
-                    cdm.onDeleteMessages = function(convId, msgs) {
-                        try {
-                            if (Array.isArray(msgs)) {
-                                msgs.forEach(m => {
-                                    if (m) {
-                                        const id = String(m.msgId || m.id || '');
-                                        const cliId = String(m.cliMsgId || '');
-                                        reportUndo(id, cliId, String(convId || ''));
-                                    }
-                                });
-                            }
-                        } catch (e) {}
-                        return origDelete.apply(this, arguments);
-                    };
-                }
+            });
+        }) || hasReceive;
 
-                if (typeof cdm.onReceiveNewMessages === 'function' && !cdm.__zaloManagerHooked) {
-                    cdm.__zaloManagerHooked = true;
-                    const origCdmBatch = cdm.onReceiveNewMessages;
-                    cdm.onReceiveNewMessages = function(convId, msgs, opt) {
-                        try {
-                            if (Array.isArray(msgs) && typeof pm.__zaloManagerHandleReceived === 'function') {
-                                msgs.forEach(m => pm.__zaloManagerHandleReceived(m));
-                            }
-                        } catch (e) {}
-                        return origCdmBatch.apply(this, arguments);
-                    };
-                }
-            }
-
-            const chat = document.querySelector('#chatViewContainer');
-            if (chat) {
-                const cKey = Object.keys(chat).find(k => k.startsWith('__react'));
-                let curr = chat[cKey];
-                let store = null;
-                while (curr) {
-                    if (curr.memoizedProps && curr.memoizedProps.store && typeof curr.memoizedProps.store.dispatch === 'function') {
-                        store = curr.memoizedProps.store;
-                        break;
-                    }
-                    curr = curr.return;
-                }
-                if (store && !store.__zaloManagerHooked) {
-                    store.__zaloManagerHooked = true;
-                    const origStoreDispatch = store.dispatch;
-                    store.dispatch = function(action) {
-                        try {
-                            if (action && typeof action === 'object') {
-                                const actType = String(action.type || '');
-                                if (/undo|delete|remove|revoke/i.test(actType)) {
-                                    const payload = action.payload || action.data || action;
-                                    const id = String(payload.msgId || payload.id || action.msgId || action.id || '');
-                                    const cliId = String(payload.cliMsgId || action.cliMsgId || '');
-                                    if (id || cliId) {
-                                        reportUndo(id, cliId, String(payload.convId || action.convId || ''));
-                                    }
-                                    if (Array.isArray(payload.ids || payload.msgIds || action.msgIds)) {
-                                        (payload.ids || payload.msgIds || action.msgIds).forEach(mId => reportUndo(String(mId), '', ''));
-                                    }
-                                }
-                            }
-                        } catch (e) {}
-                        return origStoreDispatch.apply(this, arguments);
-                    };
-                }
-            }
-        } catch (e) {}
-        return true;
+        // A generic delete/remove callback is not evidence of a recall.
+        const attached = hasReceive && hasUndo;
+        if (attached !== ready && send(attached ? 'ready' : 'waiting')) ready = attached;
     }
 
-    if (!window.__zaloManagerPmInterval) {
-        window.__zaloManagerPmInterval = setInterval(setupPmHooks, 1000);
-    }
+    retry = setInterval(setupPmHooks, 1000);
     setupPmHooks();
 })();";
             }
@@ -747,12 +716,11 @@ const title = document.querySelector('#header .header-title');
                 {
                     var serializer = new JavaScriptSerializer { MaxJsonLength = 8 * 1024 * 1024 };
                     object parsed = serializer.DeserializeObject(payload);
-                    var rows = parsed as System.Collections.IEnumerable;
-                    if (rows == null && parsed is Dictionary<string, object>)
-                        rows = new[] { (Dictionary<string, object>)parsed };
+                    var single = parsed as Dictionary<string, object>;
+                    var rows = single != null ? new[] { single } : parsed as System.Collections.IEnumerable;
                     if (rows != null)
                     {
-                        AcceptRows(profile, rows.OfType<Dictionary<string, object>>(), token);
+                        AcceptRows(profile, rows.OfType<Dictionary<string, object>>(), token, false);
                     }
                 }
                 catch (Exception error) { System.Diagnostics.Debug.WriteLine("AcceptBindingPayload: " + error.Message); }
@@ -772,276 +740,406 @@ const title = document.querySelector('#header .header-title');
                 object items;
                 var rows = value != null && value.TryGetValue("value", out items) ? items as System.Collections.IEnumerable : null;
                 if (rows == null) return;
-                AcceptRows(profile, rows.OfType<Dictionary<string, object>>(), token);
+                AcceptRows(profile, rows.OfType<Dictionary<string, object>>(), token, true);
             }
 
-            private void AcceptRows(Profile profile, IEnumerable<Dictionary<string, object>> rows, System.Threading.CancellationToken token)
+            private CapturedMessage FindCapture(string conversation, string id, string cliId)
+            {
+                CapturedMessage capture;
+                if (conversation.Length != 0 && captured.TryGetValue(Tuple.Create(conversation, id), out capture))
+                    return capture;
+                var matches = captured.Values.Where(item =>
+                    (conversation.Length == 0 || conversation == ConversationScope(item.ConversationId) ||
+                     conversation == item.PreviousConversation) &&
+                    MatchesMessage(item.Id, item.CliId, id, cliId)).Take(2).ToArray();
+                return matches.Length == 1 ? matches[0] : null;
+            }
+
+            private static string RecallThreadId(string conversation, string id)
+            {
+                return conversation.Length == 0 ? "message:" + id : "conversation:" + conversation;
+            }
+
+            public void Maintain(Profile profile, bool finishing = false)
+            {
+                if (!IsRecallEnabled(profile.Id))
+                {
+                    pending.Clear();
+                    provisionalRecalls.Clear();
+                    foreach (var capture in captured.Values) UnpinMedia(capture);
+                    captured.Clear();
+                    ApplyRecallDownloads(profile);
+                    return;
+                }
+
+                ApplyRecallDownloads(profile);
+                var now = DateTimeOffset.UtcNow;
+                if (!finishing && now < nextMaintenance) return;
+                nextMaintenance = now.AddSeconds(1);
+                if (retryPending || retryPendingOnStart || finishing)
+                {
+                    retryPendingOnStart = false;
+                    retryPending = false;
+                    foreach (var cached in IncomingMessageCache.Pending(profile.Id))
+                        CompleteCachedRecall(profile, cached, cached.PendingRecall,
+                            FindCapture(ConversationScope(cached.ConversationId), cached.Id, cached.CliMsgId), CancellationToken.None);
+                }
+
+                foreach (var capture in captured.Values.Where(item => item.AttachmentDirty))
+                {
+                    capture.AttachmentDirty = !UpdateRecallAttachment(profile.Id, capture.ConversationId, capture.RecallId, capture.Attachment);
+                    if (!capture.AttachmentDirty || finishing) UnpinMedia(capture);
+                }
+
+                for (int i = pending.Count - 1; i >= 0; i--)
+                {
+                    var undo = pending[i];
+                    if (!finishing && undo.Due > now) continue;
+                    pending.RemoveAt(i);
+                    CachedIncomingMessage original;
+                    if (undo.AwaitingScope && IncomingMessageCache.TryGet(profile.Id, undo.Conversation, undo.Id, undo.CliId, out original) &&
+                        !original.PendingPlaceholder)
+                        CompleteCachedRecall(profile, original, undo.Id, FindCapture(undo.Conversation, undo.Id, undo.CliId),
+                            new CancellationToken(finishing));
+                }
+
+                foreach (var key in captured.Where(pair => !pair.Value.Downloading && !pair.Value.AttachmentDirty &&
+                    pair.Value.Timestamp < now.AddMinutes(-15)).Select(pair => pair.Key).ToArray())
+                {
+                    if (captured[key].Recalled && captured[key].Cached.ProvisionalConversation) provisionalRecalls.Remove(key.Item2);
+                    captured.Remove(key);
+                }
+            }
+
+            private const string MissingRecallContent = "Tin đã thu hồi trước khi Manager đọc được nội dung";
+
+            private static DateTimeOffset? ReadGroupExpiry(Dictionary<string, object> row, DateTimeOffset now)
+            {
+                object group, timestamp;
+                if (!row.TryGetValue("isGroup", out group) || !true.Equals(group)) return null;
+                long number;
+                if (row.TryGetValue("timestamp", out timestamp) &&
+                    Int64.TryParse(Convert.ToString(timestamp, System.Globalization.CultureInfo.InvariantCulture), out number))
+                {
+                    if (number >= 1000000000L && number < 10000000000L) number *= 1000;
+                    if (number >= 1000000000000L && number < now.ToUnixTimeMilliseconds())
+                        now = DateTimeOffset.FromUnixTimeMilliseconds(number);
+                }
+                return now + GroupRetention;
+            }
+
+            private void CompleteCachedRecall(Profile profile, CachedIncomingMessage cached, string recallId,
+                CapturedMessage capture, CancellationToken token)
+            {
+                var thread = RecallThreadId(ConversationScope(cached.ConversationId), cached.Id);
+                if (cached.GroupExpires.HasValue && cached.GroupExpires.Value <= DateTimeOffset.UtcNow) return;
+                if (cached.PendingPlaceholder)
+                {
+                    IncomingMessageCache.Remove(cached);
+                    return;
+                }
+                bool resolutionFailed;
+                var placeholderId = ResolveRecallPlaceholder(profile.Id, thread, cached, out resolutionFailed);
+                if (resolutionFailed)
+                {
+                    IncomingMessageCache.MarkPending(cached, recallId);
+                    retryPending = true;
+                    return;
+                }
+                if (placeholderId != null) recallId = placeholderId;
+                if (cached.Outgoing)
+                {
+                    IncomingMessageCache.Remove(cached);
+                    return;
+                }
+
+                if (placeholderId == null && !RecordRecall(profile, thread, cached.ConversationName, IncomingMessageCache.GetAvatar(cached), recallId,
+                    cached.CliMsgId, cached.Content, cached.Attachment, groupExpires: cached.GroupExpires))
+                {
+                    IncomingMessageCache.MarkPending(cached, recallId);
+                    retryPending = true;
+                    return;
+                }
+
+                if (capture != null)
+                {
+                    capture.Recalled = true;
+                    if (cached.ProvisionalConversation) provisionalRecalls.Add(cached.Id);
+                    capture.RecallId = recallId;
+                    capture.ConversationId = thread;
+                    var attachment = capture.Attachment;
+                    if (attachment != null && String.IsNullOrEmpty(attachment.Data) && !String.IsNullOrEmpty(attachment.SourceUrl))
+                        QueueRecallDownload(profile, capture, attachment.SourceUrl, attachment.Original, attachment.FileSize, attachment.Checksum, token);
+                }
+                IncomingMessageCache.Remove(cached);
+            }
+
+            private void AcceptRows(Profile profile, IEnumerable<Dictionary<string, object>> rows, CancellationToken token, bool legacy)
             {
                 var now = DateTimeOffset.UtcNow;
                 foreach (var row in rows)
                 {
-                    object chatOpen;
-                    if (row.TryGetValue("chatOpen", out chatOpen) && chatOpen is bool)
-                    {
-                        bool ready = (bool)chatOpen;
-                        if (ConversationOpen != ready) Status = ready ? "Đang quét hội thoại Zalo (Endpoint)" : "Mở hội thoại ở tài khoản nhận để theo dõi thu hồi";
-                        ConversationOpen = ready;
-                        if (!ready) Status = "Mở hội thoại ở tài khoản nhận để theo dõi thu hồi";
-                        continue;
-                    }
+                    if (row.ContainsKey("chatOpen")) continue;
                     string id = Text(row, "id");
+                    string cliId = Text(row, "cliMsgId");
                     if (String.IsNullOrWhiteSpace(id) || id.Length > 120 || id.StartsWith("bg_") || id.StartsWith("conv_")) continue;
-                    string rowCliId = Text(row, "cliMsgId");
-                    if (!String.IsNullOrEmpty(rowCliId) && (rowCliId.StartsWith("bg_") || rowCliId.StartsWith("conv_"))) continue;
+                    if (!String.IsNullOrEmpty(cliId) && (cliId.Length > 120 || cliId.StartsWith("bg_") || cliId.StartsWith("conv_"))) continue;
 
-                    object mediaUpdate;
-                    CapturedMessage previous;
+                    string conversation = ConversationScope(Text(row, "conversation"));
                     string source = Text(row, "source");
-                    if (source != null && !row.ContainsKey("outgoing") && !row.ContainsKey("preview"))
-                    {
-                        lock (syncRoot) { captured.TryGetValue(id, out previous); }
-                        if (previous != null && previous.Attachment != null)
-                        {
-                            object original;
-                            QueueRecallDownload(profile, id, previous, source, row.TryGetValue("original", out original) && true.Equals(original),
-                                Text(row, "fileSize"), Text(row, "checksum"), token);
-                        }
-                        continue;
-                    }
-                    if (row.TryGetValue("mediaUpdate", out mediaUpdate) && true.Equals(mediaUpdate))
-                    {
-                        string cliId = Text(row, "cliMsgId");
-                        lock (syncRoot)
-                        {
-                            if (!captured.TryGetValue(id, out previous) && !String.IsNullOrEmpty(cliId))
-                                captured.TryGetValue(cliId, out previous);
-                        }
+                    string content = Text(row, "preview");
+                    object value;
+                    bool isMessage = !String.IsNullOrWhiteSpace(content) && content.Length <= 16000 &&
+                        row.TryGetValue("outgoing", out value) && value is bool;
+                    var capture = isMessage ? null : FindCapture(conversation, id, cliId);
 
-                        var updated = previous != null ? ReadRecallMediaUpdate(previous, row) : ReadRecallAttachment(Text(row, "kind") ?? "image", row);
-                        if (updated != null && updated.Data != null)
+                    if (row.TryGetValue("recalled", out value) && true.Equals(value))
+                    {
+                        if (row.TryGetValue("outgoing", out value) && true.Equals(value)) continue;
+                        CachedIncomingMessage cached;
+                        if (IncomingMessageCache.TryGet(profile.Id, conversation, id, cliId, out cached) && !cached.PendingPlaceholder)
                         {
-                            if (!updated.Data.StartsWith("local:", StringComparison.OrdinalIgnoreCase) && updated.Data.Length > 20000
-                                && !RecallArchivePath.EndsWith("archive.dat", StringComparison.OrdinalIgnoreCase))
+                            if (!legacy && conversation.Length == 0 && cached.ProvisionalConversation && !cached.Outgoing)
                             {
-                                try
-                                {
-                                    Directory.CreateDirectory(RecallMediaDir);
-                                    string ext = updated.Mime == "image/jpeg" ? ".jpg" : ".png";
-                                    string filePath = Path.Combine(RecallMediaDir, Guid.NewGuid().ToString("N") + ext);
-                                    File.WriteAllBytes(filePath, Convert.FromBase64String(updated.Data));
-                                    updated.Data = "local:" + filePath;
-                                }
-                                catch { }
+                                if (pending.Count < 256 && !pending.Any(item => MatchesMessage(item.Id, item.CliId, id, cliId)))
+                                    pending.Add(new PendingUndo { Id = id, CliId = cliId, Conversation = conversation,
+                                        Due = now.AddSeconds(1), AwaitingScope = true });
+                                continue;
                             }
-                            object previewOnly;
-                            if (row.TryGetValue("previewOnly", out previewOnly) && true.Equals(previewOnly)
-                                && previous != null && !String.IsNullOrEmpty(previous.Attachment != null ? previous.Attachment.Data : null)) continue;
-                            if (previous != null)
+                            if (capture == null && !cached.Outgoing && cached.Attachment != null)
+                                capture = Track(cached, now);
+                            CompleteCachedRecall(profile, cached, id, capture, token);
+                        }
+                        else if ((capture != null && (capture.Recalled || capture.Outgoing)) ||
+                            HasRecordedRecall(profile.Id, conversation, id, cliId))
+                        {
+                            continue;
+                        }
+                        else if (row.TryGetValue("observedTransition", out value) && true.Equals(value))
+                        {
+                            if (legacy)
                             {
-                                if (updated.FromSource && previous.Attachment != null && !String.IsNullOrEmpty(previous.Attachment.Data)
-                                    && previous.Attachment.Data.Length <= 20000)
-                                {
-                                    updated.PreviewData = previous.Attachment.Data;
-                                    updated.PreviewMime = previous.Attachment.Mime;
-                                }
-                                previous.Attachment = updated;
-                                if (previous.Recalled)
-                                    UpdateRecallAttachment(profile.Id, previous.ConversationId, id, updated);
+                                RecordRecall(profile, RecallThreadId(conversation, id), Text(row, "name"), ReadAvatar(row),
+                                    id, cliId, content ?? MissingRecallContent, null, false, true);
+                            }
+                            else if (pending.Any(item => item.Conversation == conversation && MatchesMessage(item.Id, item.CliId, id, cliId)))
+                            {
+                                continue;
+                            }
+                            else if (pending.Count < 256)
+                            {
+                                // Undo callbacks can fire on both sides with no sender information.
+                                // Only a matching original message can establish its direction.
+                                pending.Add(new PendingUndo { Id = id, CliId = cliId, Conversation = conversation, Due = now.AddMinutes(15) });
                             }
                             else
                             {
-                                CachedIncomingMessage cached;
-                                if (IncomingMessageCache.TryGet(id, out cached) || (!String.IsNullOrEmpty(cliId) && IncomingMessageCache.TryGet(cliId, out cached)))
-                                {
-                                    if (cached.Attachment == null) cached.Attachment = updated;
-                                    else
-                                    {
-                                        cached.Attachment.Data = updated.Data;
-                                        cached.Attachment.Mime = updated.Mime;
-                                    }
-                                }
+                                Status = "Bộ đệm thu hồi đã đầy";
                             }
-                            IncomingMessageCache.UpdateAttachment(id, updated);
-                            if (!String.IsNullOrEmpty(cliId)) IncomingMessageCache.UpdateAttachment(cliId, updated);
                         }
                         continue;
                     }
 
-                    object avatarUpdate;
-                    if (row.TryGetValue("avatarUpdate", out avatarUpdate) && true.Equals(avatarUpdate))
+                    if (row.TryGetValue("mediaUpdate", out value) && true.Equals(value))
                     {
-                        string ava = ReadAvatar(row);
-                        if (!String.IsNullOrEmpty(ava))
+                        if (capture == null || capture.Attachment == null) continue;
+                        bool previewOnly = row.TryGetValue("previewOnly", out value) && true.Equals(value);
+                        if (!previewOnly && (capture.Attachment.FromSource ||
+                            capture.Attachment.Origin == "cdn" || capture.Attachment.Origin == "local")) continue;
+                        var updated = ReadRecallMediaUpdate(capture, row);
+                        if (updated == null || updated.Data == null) continue;
+                        if (previewOnly)
                         {
-                            CapturedMessage prev;
-                            if (captured.TryGetValue(id, out prev)) prev.AvatarPng = ava;
-                            IncomingMessageCache.UpdateAvatar(id, ava);
+                            var preview = (RecallAttachment)capture.Attachment.Clone();
+                            preview.PreviewData = updated.Data;
+                            preview.PreviewMime = updated.Mime;
+                            ApplyAttachment(profile, capture, preview);
+                            continue;
                         }
+                        if (updated.FromSource && !String.IsNullOrEmpty(capture.Attachment.Data))
+                        {
+                            updated.PreviewData = capture.Attachment.Data;
+                            updated.PreviewMime = capture.Attachment.Mime;
+                        }
+                        updated.SourceUrl = capture.Attachment.SourceUrl;
+                        updated.FileSize = capture.Attachment.FileSize;
+                        updated.Checksum = capture.Attachment.Checksum;
+                        updated.Original = capture.Attachment.Original;
+                        ApplyAttachment(profile, capture, updated);
                         continue;
                     }
 
-                    object recalled;
-                    if (row.TryGetValue("recalled", out recalled) && true.Equals(recalled))
+                    if (row.TryGetValue("avatarUpdate", out value) && true.Equals(value))
                     {
-                        string cliId = Text(row, "cliMsgId");
-                        CapturedMessage capture = null;
-                        CachedIncomingMessage cachedMsg = null;
-
-                        lock (syncRoot)
-                        {
-                            if (!captured.TryGetValue(id, out capture) && !String.IsNullOrEmpty(cliId))
-                                captured.TryGetValue(cliId, out capture);
-                        }
-
-                        if (capture != null)
-                        {
-                            if (capture.Recalled) continue;
-                            capture.Recalled = true;
-                            if (!capture.Outgoing)
-                            {
-                                string conversationKey = capture.ConversationId;
-                                string convName = !String.IsNullOrWhiteSpace(capture.ConversationName) && capture.ConversationName != "Người gửi chưa xác định"
-                                    ? capture.ConversationName : Text(row, "name");
-                                if (String.IsNullOrWhiteSpace(convName)) convName = "Người gửi chưa xác định";
-                                string avatar = capture.AvatarPng;
-                                if (String.IsNullOrEmpty(avatar))
-                                    avatar = ReadAvatar(row);
-                                RecordRecall(profile, conversationKey, convName, avatar, id, cliId, capture.Content, capture.Attachment, capture.Outgoing);
-
-                                if (capture.Attachment != null && String.IsNullOrEmpty(capture.Attachment.Data) && !capture.Downloading && !String.IsNullOrEmpty(capture.Attachment.SourceUrl))
-                                {
-                                    QueueRecallDownload(profile, id, capture, capture.Attachment.SourceUrl, capture.Attachment.Original, capture.Attachment.FileSize, capture.Attachment.Checksum, token);
-                                }
-                            }
-
-                            IncomingMessageCache.Remove(id);
-                            if (!String.IsNullOrEmpty(cliId)) IncomingMessageCache.Remove(cliId);
-                        }
-                        else if (IncomingMessageCache.TryGet(id, out cachedMsg) || (!String.IsNullOrEmpty(cliId) && IncomingMessageCache.TryGet(cliId, out cachedMsg)))
-                        {
-                            if (!cachedMsg.Outgoing)
-                            {
-                                string convId = cachedMsg.ConversationId;
-                                string conversationKey = String.IsNullOrWhiteSpace(convId) || convId.Length > 200
-                                    ? "message:" + id : (convId.StartsWith("conversation:") || convId.StartsWith("message:") ? convId : "conversation:" + convId);
-                                string convName = !String.IsNullOrWhiteSpace(cachedMsg.ConversationName)
-                                    ? cachedMsg.ConversationName : "Người gửi chưa xác định";
-                                string recallCliId = !String.IsNullOrEmpty(cliId) ? cliId : cachedMsg.CliMsgId;
-                                RecordRecall(profile, conversationKey, convName, cachedMsg.AvatarPng, id, recallCliId, cachedMsg.Content, cachedMsg.Attachment, cachedMsg.Outgoing);
-
-                                if (cachedMsg.Attachment != null && String.IsNullOrEmpty(cachedMsg.Attachment.Data) && !String.IsNullOrEmpty(cachedMsg.Attachment.SourceUrl))
-                                {
-                                    var tempCap = new CapturedMessage
-                                    {
-                                        Content = cachedMsg.Content,
-                                        Attachment = cachedMsg.Attachment,
-                                        ConversationId = conversationKey,
-                                        ConversationName = convName,
-                                        AvatarPng = cachedMsg.AvatarPng,
-                                        Outgoing = cachedMsg.Outgoing,
-                                        Recalled = true
-                                    };
-                                    lock (syncRoot) { captured[id] = tempCap; }
-                                    QueueRecallDownload(profile, id, tempCap, cachedMsg.Attachment.SourceUrl, cachedMsg.Attachment.Original, cachedMsg.Attachment.FileSize, cachedMsg.Attachment.Checksum, token);
-                                }
-                            }
-
-                            IncomingMessageCache.Remove(id);
-                            if (!String.IsNullOrEmpty(cliId)) IncomingMessageCache.Remove(cliId);
-                        }
-                        else
-                        {
-                            object transition;
-                            if (row.TryGetValue("observedTransition", out transition) && true.Equals(transition))
-                            {
-                                string observedConversation = Text(row, "conversation");
-                                string conversationKey = String.IsNullOrWhiteSpace(observedConversation) || observedConversation.Length > 200
-                                    ? "message:" + id : "conversation:" + observedConversation;
-                                string conversationName = Text(row, "name");
-                                if (String.IsNullOrWhiteSpace(conversationName) || conversationName.Length > 200)
-                                    conversationName = "Người gửi chưa xác định";
-                                string previewText = Text(row, "preview");
-                                if (String.IsNullOrWhiteSpace(previewText))
-                                    previewText = "Tin đã thu hồi trước khi Manager đọc được nội dung";
-                                RecordRecall(profile, conversationKey, conversationName, ReadAvatar(row), id, cliId,
-                                    previewText, null, false);
-                            }
-                        }
+                        if (capture == null) continue;
+                        string avatar = ReadAvatar(row);
+                        if (avatar == null) continue;
+                        IncomingMessageCache.UpdateAvatar(capture.Cached, avatar);
                         continue;
                     }
 
-                    string content = Text(row, "preview");
-                    object outgoing;
-                    if (String.IsNullOrWhiteSpace(content) || content.Length > 16000
-                        || !row.TryGetValue("outgoing", out outgoing) || !(outgoing is bool)) continue;
-                    bool alreadyCaptured;
-                    lock (syncRoot) { alreadyCaptured = captured.ContainsKey(id); }
-                    if (alreadyCaptured) continue;
+                    if (!isMessage)
+                    {
+                        if (source != null && capture != null && capture.Attachment != null)
+                            QueueRecallDownload(profile, capture, source, row.TryGetValue("original", out value) && true.Equals(value),
+                                Text(row, "fileSize"), Text(row, "checksum"), token);
+                        continue;
+                    }
 
-                    string conversation = Text(row, "conversation");
+                    bool provisional = row.TryGetValue("provisionalConversation", out value) && true.Equals(value);
+                    var groupExpires = ReadGroupExpiry(row, now);
+                    CapturedMessage existingCapture;
+                    if (captured.TryGetValue(Tuple.Create(conversation, id), out existingCapture) &&
+                        (provisional || !existingCapture.Cached.ProvisionalConversation) &&
+                        EarlierExpiry(existingCapture.Cached.GroupExpires, groupExpires) == existingCapture.Cached.GroupExpires) continue;
                     string name = Text(row, "name");
-                    string msgAvatar = ReadAvatar(row);
-                    var attachment = ReadRecallAttachment(Text(row, "kind"), row);
-
-                    var cachedIncoming = new CachedIncomingMessage
+                    if (!provisional && provisionalRecalls.Contains(id))
                     {
-                        Id = id,
-                        CliMsgId = Text(row, "cliMsgId"),
-                        ProfileId = profile.Id,
-                        ConversationId = conversation,
-                        ConversationName = String.IsNullOrWhiteSpace(name) || name.Length > 200 ? "Người gửi chưa xác định" : name,
-                        AvatarPng = msgAvatar,
-                        Content = content,
-                        Attachment = attachment,
-                        Outgoing = (bool)outgoing,
-                        Timestamp = DateTimeOffset.UtcNow
-                    };
-                    IncomingMessageCache.Store(cachedIncoming);
-
-                    var capturedMsg = new CapturedMessage
-                    {
-                        Content = content,
-                        Attachment = attachment,
-                        Outgoing = (bool)outgoing,
-                        AvatarPng = msgAvatar,
-                        ConversationId = String.IsNullOrWhiteSpace(conversation) || conversation.Length > 200
-                            ? "message:" + id : (conversation.StartsWith("conversation:") ? conversation : "conversation:" + conversation),
-                        ConversationName = cachedIncoming.ConversationName
-                    };
-                    lock (syncRoot)
-                    {
-                        captured[id] = capturedMsg;
-                        string incomingCliId = Text(row, "cliMsgId");
-                        if (!String.IsNullOrEmpty(incomingCliId))
+                        var prior = FindCapture("", id, null);
+                        if (prior != null && prior.Recalled && prior.Cached.ProvisionalConversation &&
+                            MoveRecallToConversation(profile.Id, prior.ConversationId, RecallThreadId(conversation, id),
+                                prior.RecallId, name, groupExpires))
                         {
-                            captured[incomingCliId] = capturedMsg;
+                            captured.Remove(Tuple.Create(ConversationScope(prior.ConversationId), prior.Id));
+                            prior.PreviousConversation = ConversationScope(prior.ConversationId);
+                            prior.ConversationId = RecallThreadId(conversation, id);
+                            prior.Cached.ProvisionalConversation = false;
+                            prior.Cached.GroupExpires = EarlierExpiry(prior.Cached.GroupExpires, groupExpires);
+                            provisionalRecalls.Remove(id);
+                            captured[Tuple.Create(conversation, id)] = prior;
+                            continue;
                         }
                     }
-                    if (!String.IsNullOrEmpty(source) && capturedMsg.Attachment != null)
+                    if (groupExpires.HasValue && groupExpires.Value <= now) continue;
+                    var attachment = ReadRecallAttachment(Text(row, "kind"), row);
+                    bool duplicate;
+                    var received = IncomingMessageCache.StoreCaptured(new CachedIncomingMessage
                     {
-                        object original;
-                        QueueRecallDownload(profile, id, capturedMsg, source, row.TryGetValue("original", out original) && true.Equals(original),
-                            Text(row, "fileSize"), Text(row, "checksum"), token);
+                        Id = id, CliMsgId = cliId, ProfileId = profile.Id, ConversationId = conversation,
+                        ConversationName = String.IsNullOrWhiteSpace(name) || name.Length > 200 ? "Người gửi chưa xác định" : name,
+                        AvatarPng = ReadAvatar(row), Content = content, Attachment = attachment, Outgoing = true.Equals(row["outgoing"]),
+                        Timestamp = now, ProvisionalConversation = provisional, GroupExpires = groupExpires
+                    }, out duplicate);
+                    if (received == null)
+                    {
+                        Status = "Không còn chỗ trong bộ nhớ đệm tin nhắn";
+                        continue;
                     }
-                    object baseline;
-                    if (row.TryGetValue("baseline", out baseline) && true.Equals(baseline)) continue;
-                    string preview = content.Length > 280 ? content.Substring(0, 280) : content;
+                    var captureKey = duplicate ? captured.FirstOrDefault(pair => ReferenceEquals(pair.Value.Cached, received)) :
+                        default(KeyValuePair<Tuple<string, string>, CapturedMessage>);
+                    if (captureKey.Key != null)
+                    {
+                        capture = captureKey.Value;
+                        captured.Remove(captureKey.Key);
+                        if (captureKey.Key.Item1 != ConversationScope(received.ConversationId))
+                            capture.PreviousConversation = captureKey.Key.Item1;
+                        capture.ConversationId = RecallThreadId(ConversationScope(received.ConversationId), received.Id);
+                        capture.CliId = received.CliMsgId;
+                        captured[Tuple.Create(ConversationScope(received.ConversationId), received.Id)] = capture;
+                    }
+                    else capture = Track(received, now);
+                    conversation = ConversationScope(received.ConversationId);
 
+                    var waiting = pending.Where(item => (item.Conversation.Length == 0 || item.Conversation == conversation) &&
+                        MatchesMessage(item.Id, item.CliId, id, cliId)).ToArray();
+                    if (waiting.Length != 0 || received.PendingRecall != null)
+                    {
+                        foreach (var undo in waiting) pending.Remove(undo);
+                        CompleteCachedRecall(profile, received, waiting.Length == 0 ? received.PendingRecall : waiting[0].Id, capture, token);
+                    }
+                    else
+                    {
+                        bool resolutionFailed;
+                        var recallId = ResolveRecallPlaceholder(profile.Id, capture.ConversationId, received, out resolutionFailed);
+                        if (resolutionFailed)
+                        {
+                            IncomingMessageCache.MarkPending(received, recallId);
+                            retryPending = true;
+                        }
+                        else if (recallId != null)
+                        {
+                            capture.RecallId = recallId;
+                            capture.Recalled = !received.Outgoing;
+                            IncomingMessageCache.Remove(received);
+                        }
+                        if (source != null && attachment != null && !received.Outgoing)
+                            QueueRecallDownload(profile, capture, source, row.TryGetValue("original", out value) && true.Equals(value),
+                                Text(row, "fileSize"), Text(row, "checksum"), token);
+                    }
+
+                    if (duplicate || (row.TryGetValue("baseline", out value) && true.Equals(value))) continue;
                     var message = new ZaloMessageEventArgs
                     {
-                        ProfileId = profile.Id,
-                        MessageId = id,
-                        IsOutgoing = (bool)outgoing,
-                        TextPreview = preview,
+                        ProfileId = profile.Id, MessageId = id, IsOutgoing = capture.Outgoing,
+                        TextPreview = content.Length > 280 ? content.Substring(0, 280) : content,
                         DetectedAt = now.ToLocalTime()
                     };
-                    Status = (message.IsOutgoing ? "Tin gửi" : "Tin nhận") + " · "
-                        + message.DetectedAt.ToString("HH:mm:ss") + Environment.NewLine + preview;
+                    Status = (message.IsOutgoing ? "Tin gửi" : "Tin nhận") + " · " + message.DetectedAt.ToString("HH:mm:ss");
                     var handlers = MessageDetected;
-                    if (handlers == null) continue;
-                    foreach (EventHandler<ZaloMessageEventArgs> handler in handlers.GetInvocationList())
-                        try { handler(null, message); }
-                        catch (Exception error) { System.Diagnostics.Debug.WriteLine(error.GetType().Name); }
+                    if (handlers != null)
+                        foreach (EventHandler<ZaloMessageEventArgs> handler in handlers.GetInvocationList())
+                            try { handler(null, message); }
+                            catch (Exception error) { System.Diagnostics.Debug.WriteLine(error.GetType().Name); }
+                }
+            }
+
+            private CapturedMessage Track(CachedIncomingMessage message, DateTimeOffset now)
+            {
+                if (captured.Count >= 2048)
+                {
+                    var oldest = captured.Where(item => !item.Value.Downloading && !item.Value.AttachmentDirty)
+                        .OrderBy(item => item.Value.Timestamp).FirstOrDefault();
+                    if (oldest.Key != null)
+                    {
+                        if (oldest.Value.Recalled && oldest.Value.Cached.ProvisionalConversation) provisionalRecalls.Remove(oldest.Key.Item2);
+                        captured.Remove(oldest.Key);
+                    }
+                }
+                var conversation = ConversationScope(message.ConversationId);
+                var capture = new CapturedMessage
+                {
+                    Id = message.Id, CliId = message.CliMsgId, Timestamp = now, Cached = message,
+                    Content = message.Content, Attachment = message.Attachment,
+                    Outgoing = message.Outgoing, ConversationId = RecallThreadId(conversation, message.Id)
+                };
+                if (captured.Count < 2048) captured[Tuple.Create(conversation, capture.Id)] = capture;
+                return capture;
+            }
+
+            private void ApplyAttachment(Profile profile, CapturedMessage capture, RecallAttachment attachment)
+            {
+                if (capture.Cached.GroupExpires.HasValue && capture.Cached.GroupExpires.Value <= DateTimeOffset.UtcNow) return;
+                var publishing = new List<string>();
+                try
+                {
+                    attachment = OffloadInlineMedia(attachment, publishing);
+                    lock (RecallMediaGate)
+                    {
+                        capture.Attachment = attachment;
+                        IncomingMessageCache.UpdateAttachment(capture.Cached, attachment);
+                        if (!capture.Recalled && capture.Cached.Attachment != null)
+                            capture.Attachment = capture.Cached.Attachment;
+                        UnpinMedia(capture);
+                        capture.AttachmentDirty = capture.Recalled &&
+                            !UpdateRecallAttachment(profile.Id, capture.ConversationId, capture.RecallId, capture.Attachment);
+                        if (capture.AttachmentDirty && attachment.Data != null && attachment.Data.StartsWith("local:", StringComparison.Ordinal))
+                        {
+                            capture.PinnedMedia = Path.GetFullPath(attachment.Data.Substring("local:".Length));
+                            UncommittedMedia.Add(capture.PinnedMedia);
+                        }
+                    }
+                }
+                finally { ReleasePublishingMedia(publishing); }
+
+            }
+
+            private static void UnpinMedia(CapturedMessage capture)
+            {
+                lock (RecallMediaGate)
+                {
+                    if (capture.PinnedMedia == null) return;
+                    UncommittedMedia.Remove(capture.PinnedMedia);
+                    capture.PinnedMedia = null;
                 }
             }
 
@@ -1102,7 +1200,7 @@ const title = document.querySelector('#header .header-title');
 
                 bool image = kind == "image" || kind == "sticker" || kind == "contact";
                 bool isLocal = !String.IsNullOrEmpty(data) && data.StartsWith("local:", StringComparison.OrdinalIgnoreCase);
-                if (String.IsNullOrEmpty(data) || (!isLocal && (data.Length > MaxRecallMediaBase64 || data.Length % 4 != 0))
+                if (String.IsNullOrEmpty(data) || isLocal || data.Length > MaxRecallMediaBase64 || data.Length % 4 != 0
                     || kind == "emoji" || (!isLocal && image && mime != "image/jpeg" && mime != "image/png" && mime != "image/webp" && mime != "image/gif" && mime != "image/jxl"))
                     return new RecallAttachment
                     {

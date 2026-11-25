@@ -80,8 +80,8 @@ namespace ZaloManagerPoc
             get
             {
                 if (Status != "Đang chạy") return "○ " + (Status ?? "Đã dừng");
-                if (!CdpMessageWatcher.IsTracking(this)) return "Chưa theo dõi";
-                return CdpMessageWatcher.HasOpenConversation(this) ? "● Đang theo dõi" : "Chờ mở chat";
+                if (!CdpMessageWatcher.IsRecallEnabled(Id)) return "Đã tắt theo dõi";
+                return CdpMessageWatcher.IsTracking(this) ? "● Đang theo dõi" : "Chưa sẵn sàng";
             }
         }
         public string StatusBackground { get { return Status == "Đang chạy" ? (CdpMessageWatcher.HasOpenConversation(this) ? "#ECFDF5" : "#FFFBEB") : "#F1F5F9"; } }
@@ -361,31 +361,28 @@ namespace ZaloManagerPoc
             }
         }
 
-        public static List<Process> Processes(Profile profile)
+        private static List<string> ProcessRoots(Profile profile)
         {
-            var found = new List<Process>();
             var roots = new List<string> { Path.GetDirectoryName(profile.Executable).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar };
             if (!profile.IsOriginal)
             {
                 roots.Add(Path.Combine(Store.Root, "Instances", profile.Id) + Path.DirectorySeparatorChar);
                 roots.Add(Path.Combine(Store.Root, "Releases", profile.Id) + Path.DirectorySeparatorChar);
             }
+            return roots;
+        }
+
+        public static List<Process> Processes(Profile profile)
+        {
+            var found = new List<Process>();
+            var roots = ProcessRoots(profile);
             foreach (var process in Process.GetProcesses())
             {
                 try
                 {
-                    if (!RuntimeProcesses.Contains(process.ProcessName)) { process.Dispose(); continue; }
-                    IntPtr handle = OpenProcess(0x1000, false, process.Id);
-                    if (handle != IntPtr.Zero)
-                    {
-                        try
-                        {
-                            var path = new StringBuilder(32768); int size = path.Capacity;
-                            if (QueryFullProcessImageName(handle, 0, path, ref size) && roots.Any(root => path.ToString().StartsWith(root, StringComparison.OrdinalIgnoreCase)))
-                            { found.Add(process); continue; }
-                        }
-                        finally { CloseHandle(handle); }
-                    }
+                    string path = GetRuntimeProcessPath(process);
+                    if (path != null && roots.Any(root => path.StartsWith(root, StringComparison.OrdinalIgnoreCase)))
+                    { found.Add(process); continue; }
                 }
                 catch (System.ComponentModel.Win32Exception) { }
                 catch (InvalidOperationException) { }
@@ -394,29 +391,65 @@ namespace ZaloManagerPoc
             return found;
         }
 
-        public static void Open(Profile profile)
+        private static string GetRuntimeProcessPath(Process process)
         {
-            OpenAndCheckWindow(profile);
+            if (!RuntimeProcesses.Contains(process.ProcessName)) return null;
+            IntPtr handle = OpenProcess(0x1000, false, process.Id);
+            if (handle == IntPtr.Zero) return null;
+            try
+            {
+                var path = new StringBuilder(32768);
+                int size = path.Capacity;
+                return QueryFullProcessImageName(handle, 0, path, ref size) ? path.ToString() : null;
+            }
+            finally { CloseHandle(handle); }
         }
 
-        internal static bool OpenAndCheckWindow(Profile profile)
+        internal static Dictionary<Profile, int[]> ScanProfileProcesses(Profile[] profiles)
+        {
+            var paths = new List<KeyValuePair<int, string>>();
+            foreach (var process in Process.GetProcesses())
+            using (process)
+            {
+                try
+                {
+                    var path = GetRuntimeProcessPath(process);
+                    if (path != null) paths.Add(new KeyValuePair<int, string>(process.Id, path));
+                }
+                catch (System.ComponentModel.Win32Exception) { }
+                catch (InvalidOperationException) { }
+            }
+            return profiles.ToDictionary(profile => profile, profile =>
+            {
+                var roots = ProcessRoots(profile);
+                return paths.Where(entry => roots.Any(root => entry.Value.StartsWith(root,
+                    StringComparison.OrdinalIgnoreCase))).Select(entry => entry.Key).ToArray();
+            });
+        }
+
+        public static void Open(Profile profile, bool track = true)
+        {
+            OpenAndCheckWindow(profile, track);
+        }
+
+        internal static bool OpenAndCheckWindow(Profile profile, bool track = true)
         {
             using (var launch = new Mutex(false, "Local\\ZaloManagerProfileLaunch-" + profile.Id))
             {
                 try { launch.WaitOne(TimeSpan.FromSeconds(15)); }
                 catch (AbandonedMutexException) { }
-                try { return OpenProfile(profile); }
+                try { return OpenProfile(profile, track); }
                 finally { try { launch.ReleaseMutex(); } catch (ApplicationException) { } }
             }
         }
 
-        private static bool OpenProfile(Profile profile)
+        private static bool OpenProfile(Profile profile, bool track)
         {
             bool running = IsRunning(profile);
             int runningPort = running ? CdpMessageWatcher.FindPort(profile) : 0;
             if (running && runningPort > 0 && WindowActivation.Restore(profile))
             {
-                CdpMessageWatcher.Start(profile, runningPort);
+                if (track) CdpMessageWatcher.Start(profile, runningPort);
                 return true;
             }
             if (running && runningPort == 0)
@@ -438,7 +471,7 @@ namespace ZaloManagerPoc
             };
             startInfo.EnvironmentVariables.Remove("ELECTRON_RUN_AS_NODE");
             using (Process.Start(startInfo)) { }
-            CdpMessageWatcher.Start(profile, running ? 0 : port);
+            if (track) CdpMessageWatcher.Start(profile, running ? 0 : port);
             for (int attempt = 0; attempt < 40; attempt++)
             { System.Threading.Thread.Sleep(250); if (WindowActivation.Restore(profile)) return true; }
             return false;
@@ -563,6 +596,7 @@ namespace ZaloManagerPoc
             Loaded += delegate { TrayManager.Initialize(this); };
             Closing += delegate(object sender, System.ComponentModel.CancelEventArgs args)
             {
+                if (TrayManager.IsExiting) return;
                 if (busy) { args.Cancel = true; status.Text = "Đang chuẩn bị phiên bản. Chờ hoàn tất để đóng ứng dụng."; return; }
                 args.Cancel = true;
                 TrayManager.HideToTray();
@@ -576,6 +610,7 @@ namespace ZaloManagerPoc
             Closed += delegate
             {
                 CdpMessageWatcher.RecalledMessagesChanged -= refreshRecallBadges;
+                CloseStorageMonitoring();
                 timer.Stop();
                 CdpMessageWatcher.StopAll();
             };
@@ -684,16 +719,65 @@ namespace ZaloManagerPoc
             UpdateProfileStatus(true);
         }
 
-        private void UpdateProfileStatus(bool refreshGrid)
+        private bool processStatusScanning;
+        private bool processStatusRefreshRequested;
+
+        private async void UpdateProfileStatus(bool refreshGrid)
         {
             var displayed = new List<Profile>();
             if (originalRow != null) displayed.Add(originalRow);
             displayed.AddRange(profiles);
             bool changed = !rows.SequenceEqual(displayed);
-            if (changed) { rows.Clear(); foreach (var row in displayed) rows.Add(row); displayedCdpStatus.Clear(); }
-            foreach (var profile in rows)
+            if (changed)
             {
-                var running = Instance.Processes(profile);
+                rows.Clear();
+                foreach (var row in displayed) rows.Add(row);
+                displayedCdpStatus.Clear();
+                profileStorageRefreshRequested = true;
+            }
+            RefreshStorageUsage();
+            if (processStatusScanning)
+            {
+                processStatusRefreshRequested |= changed || refreshGrid;
+                return;
+            }
+            var snapshotRows = rows.ToArray();
+            processStatusScanning = true;
+            Dictionary<Profile, int[]> snapshot;
+            try { snapshot = await Task.Run(() => Instance.ScanProfileProcesses(snapshotRows)).ConfigureAwait(false); }
+            catch (Exception error)
+            {
+                Store.Log(error);
+                snapshot = null;
+            }
+            try
+            {
+                await Dispatcher.InvokeAsync(new Action(delegate
+                {
+                    processStatusScanning = false;
+                    if (snapshot != null) ApplyProcessStatus(snapshotRows, snapshot, changed || refreshGrid);
+                })).Task.ConfigureAwait(false);
+            }
+            catch (TaskCanceledException) { }
+        }
+
+        private void ApplyProcessStatus(Profile[] snapshotRows, Dictionary<Profile, int[]> snapshot, bool changed)
+        {
+            if (TrayManager.IsExiting || Dispatcher.HasShutdownStarted) return;
+            if (processStatusRefreshRequested || !rows.SequenceEqual(snapshotRows))
+            {
+                processStatusRefreshRequested = false;
+                UpdateProfileStatus(true);
+                return;
+            }
+            foreach (var profile in snapshotRows)
+            {
+                var running = new List<Process>();
+                foreach (int id in snapshot[profile])
+                {
+                    try { running.Add(Process.GetProcessById(id)); }
+                    catch (ArgumentException) { }
+                }
                 string nextStatus = running.Count > 0 ? "Đang chạy" : (!profile.IsOriginal && profile.PatchedHash == null ? "Chuẩn bị chưa xong" : "Đã dừng");
                 changed |= profile.Status != nextStatus;
                 profile.Status = nextStatus;
@@ -710,9 +794,8 @@ namespace ZaloManagerPoc
                 changed |= !displayedCdpStatus.TryGetValue(profile, out previousStatus) || previousStatus != statusKey;
                 displayedCdpStatus[profile] = statusKey;
             }
-            if (changed || refreshGrid) grid.Items.Refresh();
+            if (changed) grid.Items.Refresh();
             if (profileCount != null) profileCount.Text = "Tổng cộng " + rows.Count + " hồ sơ";
-            RefreshStorageUsage();
         }
         private async void AddProfile(object sender, RoutedEventArgs args)
         {
@@ -768,7 +851,6 @@ namespace ZaloManagerPoc
             ShellIdentity.SetManagerIdentity();
             // The file CDN can close the legacy Framework negotiation before returning HTTP.
             System.Net.ServicePointManager.SecurityProtocol = System.Net.SecurityProtocolType.Tls12;
-            CdpMessageWatcher.IncomingMessageCache.Initialize();
             bool profileLaunch = args.Length == 2 && args[0] == "--open-profile";
             bool owner;
             using (var mutex = new Mutex(true, "Local\\ZaloManagerPoC", out owner))
@@ -780,9 +862,14 @@ namespace ZaloManagerPoc
                 }
                 try
                 {
+                    if (owner)
+                    {
+                        CdpMessageWatcher.IncomingMessageCache.Initialize();
+                        CdpMessageWatcher.ScheduleRecallMediaScan();
+                    }
                     if (profileLaunch)
                     {
-                        Instance.Open(ResolveShortcutProfile(args[1]));
+                        Instance.Open(ResolveShortcutProfile(args[1]), owner);
                         if (!owner) return;
                     }
                     if (args.Length > 0 && args[0] == "--probe")

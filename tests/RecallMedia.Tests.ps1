@@ -29,6 +29,15 @@ if (!$Stage) {
         foreach ($path in @($built, $Fixture, $Archive, ($Archive + '.tmp'))) {
             if ($path -and [IO.File]::Exists($path)) { [IO.File]::Delete($path) }
         }
+        foreach ($folder in @((Join-Path $work 'media'), (Join-Path $work 'media-staging'))) {
+            if ([IO.Directory]::Exists($folder)) {
+                foreach ($media in [IO.Directory]::EnumerateFiles($folder)) { [IO.File]::Delete($media) }
+                [IO.Directory]::Delete($folder)
+            }
+        }
+        foreach ($cache in @((Join-Path $work 'cache.dat'), (Join-Path $work 'cache.dat.tmp'))) {
+            if ([IO.File]::Exists($cache)) { [IO.File]::Delete($cache) }
+        }
         [IO.Directory]::Delete($work)
     }
     return
@@ -40,11 +49,55 @@ $flags = [Reflection.BindingFlags]'Static,NonPublic'
 $instance = [Reflection.BindingFlags]'Instance,NonPublic'
 $watcher = [ZaloManagerPoc.CdpMessageWatcher]
 $watcher.GetField('RecallArchivePath', $flags).SetValue($null, $Archive)
+$work = [IO.Path]::GetDirectoryName($Archive)
+$watcher.GetField('RecallMediaDir', $flags).SetValue($null, (Join-Path $work 'media'))
+$watcher.GetField('RecallStagingDir', $flags).SetValue($null, (Join-Path $work 'media-staging'))
+$watcher.GetNestedType('IncomingMessageCache', [Reflection.BindingFlags]::NonPublic).GetField('CachePath', $flags).SetValue($null, (Join-Path $work 'cache.dat'))
 $fixtureData = [IO.File]::ReadAllText($Fixture) | ConvertFrom-Json
 $profile = New-Object ZaloManagerPoc.Profile
 $profile.Id = '900001'
 
 if ($Stage -eq 'Capture') {
+    Add-Type -TypeDefinition @'
+using System;
+using System.IO;
+using System.Threading;
+using System.Threading.Tasks;
+
+public sealed class RecallSlowFixture : MemoryStream
+{
+    private readonly int delay;
+    private int reads;
+    public int Aborts;
+    public RecallSlowFixture(int milliseconds) { delay = milliseconds; }
+    public void Abort() { Interlocked.Increment(ref Aborts); }
+    public override async Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken token)
+    {
+        if (reads++ == 2) return 0;
+        await Task.Delay(delay, token);
+        buffer[offset] = 7;
+        return 1;
+    }
+}
+'@
+    $stageMedia = $watcher.GetMethod('StageMedia', $flags)
+    $slow = [RecallSlowFixture]::new(4200)
+    $abort = [Delegate]::CreateDelegate([Action],$slow,$slow.GetType().GetMethod('Abort'))
+    $slowCopy = $stageMedia.Invoke($null,@($slow,'file',$false,[long]2,[long]2,$null,$null,
+        [Threading.CancellationToken]::None,$abort.PSObject.BaseObject)).GetAwaiter().GetResult()
+    if (!$slowCopy -or $slow.Aborts -ne 0) { throw 'A steady stream exceeded the old timeout and was interrupted' }
+    $watcher.GetMethod('DeleteStagedMedia',$flags).Invoke($null,@($slowCopy))
+    $slow.Dispose()
+    $stalled = [RecallSlowFixture]::new(14000)
+    $abort = [Delegate]::CreateDelegate([Action],$stalled,$stalled.GetType().GetMethod('Abort'))
+    $failure = $null
+    try {
+        $stageMedia.Invoke($null,@($stalled,'file',$false,[long]2,[long]2,$null,$null,
+            [Threading.CancellationToken]::None,$abort.PSObject.BaseObject)).GetAwaiter().GetResult() | Out-Null
+    } catch { $failure = $_.Exception.GetBaseException().Message }
+    finally { $stalled.Dispose() }
+    if ($failure -ne 'idle-timeout') { throw "Stalled media reported '$failure' instead of idle timeout" }
+    'PASS steady media beyond 8 seconds and stalled media idle timeout'
     $redirect = $watcher.GetMethod('RecallRedirectTarget', $flags)
     $source = [uri]'https://file.zadn.vn/file/start'
     foreach ($status in @(301,302,303,307,308)) {
@@ -53,17 +106,41 @@ if ($Stage -eq 'Capture') {
     }
     $target = $redirect.Invoke($null, @($source, 302, '../end', 4))
     if ($target.AbsoluteUri -ne 'https://file.zadn.vn/end') { throw 'Relative redirect failed' }
+    $fileEdge = [uri]'https://file-stal-17.dlfl.vn/start'
+    $redirectedEdge = 'https://file-stal-17.flchat.vn/end'
+    if ($redirect.Invoke($null,@($fileEdge,302,$redirectedEdge,0)).AbsoluteUri -ne $redirectedEdge) {
+        throw 'The observed Zalo file edge redirect was rejected'
+    }
+    $regionalEdge = 'https://file-stal-17-te-vnno-ne-6.flchat.vn/end'
+    if ($redirect.Invoke($null,@([uri]$redirectedEdge,302,$regionalEdge,1)).AbsoluteUri -ne $regionalEdge) {
+        throw 'The observed Zalo regional edge redirect was rejected'
+    }
+    foreach ($blockedEdge in @('http://file-stal-17.flchat.vn/end','https://file-stal-18.flchat.vn/end',
+        'https://file-stal-17.flchat.vn:444/end','https://user@file-stal-17.flchat.vn/end')){
+        $edgeFailure = $null
+        try { $redirect.Invoke($null,@($fileEdge,302,$blockedEdge,0)) | Out-Null }
+        catch { $edgeFailure = $_.Exception.GetBaseException().Message }
+        if ($edgeFailure -ne 'redirect-policy') { throw 'An unverified file edge was allowed' }
+    }
     if ($redirect.Invoke($null, @($source, 403, '/end', 0))) { throw '403 should not be treated as a redirect' }
     foreach ($case in @(
-        @('https://zadn.vn.example.com/end', 0, 'redirect-blocked'),
-        @('http://file.zadn.vn/end', 0, 'redirect-blocked'),
-        @('', 0, 'redirect-blocked'),
+        @('https://zadn.vn.example.com/end?token=fixture-secret', 0, 'redirect-policy', 'zadn.vn.example.com'),
+        @('http://file.zadn.vn/end', 0, 'redirect-policy', 'file.zadn.vn'),
+        @($redirectedEdge, 0, 'redirect-policy', 'file-stal-17.flchat.vn'),
+        @($regionalEdge, 0, 'redirect-policy', 'file-stal-17-te-vnno-ne-6.flchat.vn'),
+        @('https://[broken', 0, 'redirect-invalid-location', $null),
+        @('', 0, 'redirect-missing-location', $null),
         @('/loop', 5, 'redirect-limit')
     )) {
         $failure = $null
+        $rejectedHost = $null
         try { $redirect.Invoke($null, @($source, 302, $case[0], $case[1])) | Out-Null }
-        catch { $failure = $_.Exception.GetBaseException().Message }
-        if ($failure -ne $case[2]) { throw "Unexpected redirect result: $failure" }
+        catch {
+            $errorDetail = $_.Exception.GetBaseException()
+            $failure = $errorDetail.Message
+            $rejectedHost = $errorDetail.RedirectHost
+        }
+        if ($failure -ne $case[2] -or $rejectedHost -ne $case[3]) { throw "Unexpected redirect result: $failure / $rejectedHost" }
     }
     'PASS CDN redirect status, HTTPS destination validation and hop limit'
     $pictureMime = $watcher.GetMethod('RecallPictureMime', $flags)
@@ -98,9 +175,11 @@ if ($Stage -eq 'Capture') {
         $checksum = [string](Get-FileHash -LiteralPath $localFile -Algorithm SHA256).Hash
         $noCancel = [Threading.CancellationToken]::None
         $copy = $local.Invoke($null, @($folder, 'verified.txt', 'file', [long]$sample.Length, $checksum, $noCancel))
-        if (!$copy -or $copy.GetType().GetField('Data', $instance).GetValue($copy) -ne [Convert]::ToBase64String($sample)) {
+        $staged = if ($copy) { $copy.GetType().GetField('StagedPath', $instance).GetValue($copy) }
+        if (!$staged -or [Convert]::ToBase64String([IO.File]::ReadAllBytes($staged)) -ne [Convert]::ToBase64String($sample)) {
             throw 'The verified local copy should preserve the original bytes'
         }
+        $watcher.GetMethod('DeleteStagedMedia', $flags).Invoke($null, @($copy))
         [IO.File]::WriteAllBytes($localFile, [Text.Encoding]::UTF8.GetBytes('Modified bytes'))
         if ($local.Invoke($null, @($folder, 'verified.txt', 'file', [long]$sample.Length, $checksum, $noCancel))) {
             throw 'A same-size local file with a different checksum should not be archived'
@@ -179,7 +258,8 @@ try {
             }
             $data = $attachmentType.GetField('Data', $instance).GetValue($attachment)
             if ($expected.sha256) {
-                $actualHash = [BitConverter]::ToString($sha.ComputeHash([Convert]::FromBase64String($data))).Replace('-','')
+                $bytes = if ($data.StartsWith('local:')) { [IO.File]::ReadAllBytes($data.Substring(6)) } else { [Convert]::FromBase64String($data) }
+                $actualHash = [BitConverter]::ToString($sha.ComputeHash($bytes)).Replace('-','')
                 if ($actualHash -ne $expected.sha256) {
                     throw "Stored bytes differ for $($expected.id)."
                 }

@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Text;
 using System.Windows;
@@ -226,15 +227,8 @@ namespace ZaloManagerPoc
                 HorizontalContentAlignment = HorizontalAlignment.Stretch, VerticalContentAlignment = VerticalAlignment.Stretch,
                 Cursor = System.Windows.Input.Cursors.Hand };
             System.Windows.Automation.AutomationProperties.SetName(preview, "Phóng to");
-            preview.Click += delegate { ShowRecallImage(image, message, owner); };
+            preview.Click += delegate { ShowRecallImage(DecodeRecallMediaImage(message.Attachment, 0) ?? image, message, owner); };
             stage.Children.Add(preview);
-            if (!sticker && message.Attachment.FromSource && Math.Min(image.PixelWidth, image.PixelHeight) >= 720)
-            {
-                stage.Children.Add(new Border { Background = ModernBrush("#CC1E293B"), CornerRadius = new CornerRadius(4),
-                    Child = new TextBlock { Text = "HD", Foreground = Brushes.White, FontWeight = FontWeights.SemiBold, FontSize = 10 },
-                    Padding = new Thickness(5, 2, 5, 2), Margin = new Thickness(9), HorizontalAlignment = HorizontalAlignment.Left,
-                    VerticalAlignment = VerticalAlignment.Top, IsHitTestVisible = false });
-            }
             if (!String.IsNullOrEmpty(message.Attachment.Data))
             {
                 var download = RecallDownloadButton(message, owner);
@@ -452,6 +446,10 @@ namespace ZaloManagerPoc
                 case "pending": return "Manager chưa lưu xong nội dung đính kèm.";
                 case "redirect-limit": return "Nguồn tải chuyển hướng quá nhiều lần.";
                 case "redirect-blocked": return "Nguồn tải chuyển hướng đến địa chỉ Manager không hỗ trợ.";
+                case "redirect-policy": return "Nguồn tải chuyển hướng đến địa chỉ Manager không hỗ trợ.";
+                case "redirect-missing-location": return "Máy chủ không cung cấp địa chỉ chuyển hướng tải tệp.";
+                case "redirect-invalid-location": return "Máy chủ cung cấp địa chỉ chuyển hướng tải tệp không hợp lệ.";
+                case "local-missing": return "Tệp đã được dọn khỏi bộ nhớ đệm.";
                 case "http-401":
                 case "http-403": return "Máy chủ từ chối quyền tải nội dung đính kèm.";
                 case "too-large": return "Tệp vượt giới hạn lưu 16 MiB.";
@@ -615,52 +613,76 @@ namespace ZaloManagerPoc
             return viewer;
         }
 
-        private static BitmapSource DecodeRecallMediaImage(CdpMessageWatcher.RecallAttachment attachment)
+        private static BitmapSource DecodeRecallMediaImage(CdpMessageWatcher.RecallAttachment attachment, int width = 440)
         {
-            return DecodeRecallImageBytes(attachment.Data) ?? DecodeRecallImageBytes(attachment.PreviewData);
+            if (width > 0)
+                return DecodeRecallImageBytes(attachment.PreviewData, width) ?? DecodeRecallImageBytes(attachment.Data, width);
+            return DecodeRecallImageBytes(attachment.Data, 0) ?? DecodeRecallImageBytes(attachment.PreviewData, 0);
         }
 
-        private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, BitmapSource> ImageCache =
-            new System.Collections.Concurrent.ConcurrentDictionary<string, BitmapSource>();
+        private const long ImageCacheBudget = 24 * 1024 * 1024;
+        private static readonly object ImageCacheGate = new object();
+        private static readonly Dictionary<string, BitmapSource> ImageCache = new Dictionary<string, BitmapSource>();
+        private static readonly Queue<string> ImageCacheOrder = new Queue<string>();
+        private static long imageCacheBytes;
 
-        private static BitmapSource DecodeRecallImageBytes(string data)
+        private static long BitmapBytes(BitmapSource image)
+        {
+            return (long)image.PixelWidth * image.PixelHeight * Math.Max(4, (image.Format.BitsPerPixel + 7) / 8);
+        }
+
+        private static BitmapSource DecodeRecallImageBytes(string data, int width = 440)
         {
             if (String.IsNullOrEmpty(data)) return null;
             try
             {
+                string key = width + ":" + data;
                 BitmapSource cached;
-                if (ImageCache.TryGetValue(data, out cached)) return cached;
+                lock (ImageCacheGate)
+                    if (width > 0 && ImageCache.TryGetValue(key, out cached)) return cached;
 
-                if (data.StartsWith("local:", StringComparison.OrdinalIgnoreCase))
-                {
-                    string localPath = data.Substring("local:".Length);
-                    if (File.Exists(localPath))
-                    {
-                        var bmp = new BitmapImage();
-                        bmp.BeginInit();
-                        bmp.CacheOption = BitmapCacheOption.OnLoad;
-                        bmp.UriSource = new Uri(localPath, UriKind.Absolute);
-                        bmp.EndInit();
-                        bmp.Freeze();
-                        if (ImageCache.Count > 200) ImageCache.Clear();
-                        ImageCache[data] = bmp;
-                        return bmp;
-                    }
-                    return null;
-                }
-                using (var stream = new MemoryStream(Convert.FromBase64String(data), false))
+                using (var stream = data.StartsWith("local:", StringComparison.OrdinalIgnoreCase)
+                    ? (Stream)File.OpenRead(data.Substring("local:".Length))
+                    : new MemoryStream(Convert.FromBase64String(data), false))
                 {
                     var frame = BitmapDecoder.Create(stream, BitmapCreateOptions.DelayCreation, BitmapCacheOption.OnDemand).Frames[0];
-                    if ((long)frame.PixelWidth * frame.PixelHeight > 40000000) return null;
-                    var pixels = new WriteableBitmap(frame);
-                    pixels.Freeze();
-                    if (ImageCache.Count > 200) ImageCache.Clear();
-                    ImageCache[data] = pixels;
-                    return pixels;
+                    int longest = Math.Max(frame.PixelWidth, frame.PixelHeight);
+                    if (width == 0 && (long)frame.PixelWidth * frame.PixelHeight > 40000000) width = 2048;
+                    stream.Position = 0;
+                    var bitmap = new BitmapImage();
+                    bitmap.BeginInit();
+                    bitmap.CacheOption = BitmapCacheOption.OnLoad;
+                    bitmap.StreamSource = stream;
+                    if (width > 0 && longest > width)
+                    {
+                        if (frame.PixelWidth >= frame.PixelHeight) bitmap.DecodePixelWidth = width;
+                        else bitmap.DecodePixelHeight = width;
+                    }
+                    bitmap.EndInit();
+                    bitmap.Freeze();
+                    long bytes = BitmapBytes(bitmap) + key.Length * sizeof(char);
+                    if (width > 0 && bytes <= ImageCacheBudget)
+                    {
+                        lock (ImageCacheGate)
+                        {
+                            if (ImageCache.TryGetValue(key, out cached)) return cached;
+                            while (imageCacheBytes + bytes > ImageCacheBudget && ImageCacheOrder.Count > 0)
+                            {
+                                string oldest = ImageCacheOrder.Dequeue();
+                                imageCacheBytes -= BitmapBytes(ImageCache[oldest]) + oldest.Length * sizeof(char);
+                                ImageCache.Remove(oldest);
+                            }
+                            ImageCache.Add(key, bitmap);
+                            ImageCacheOrder.Enqueue(key);
+                            imageCacheBytes += bytes;
+                        }
+                    }
+                    return bitmap;
                 }
             }
             catch (FormatException) { return null; }
             catch (IOException) { return null; }
+            catch (UnauthorizedAccessException) { return null; }
             catch (NotSupportedException) { return null; }
         }
 
