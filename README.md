@@ -1,41 +1,40 @@
-- Ứng dụng Windows quản lý nhiều tài khoản Zalo PC trong một giao diện.
-- Nhận diện Zalo gốc, tạo clone với thư mục dữ liệu riêng.
-- Mở, dừng, đổi tên, đổi avatar và tạo shortcut cho từng hồ sơ.
-- Hiển thị dung lượng data và app của từng hồ sơ.
-- Kiểm tra và cập nhật clone từ bản Zalo gốc theo thao tác người dùng.
-- Xuất/nhập dữ liệu, kiểm tra ID tài khoản và giữ bản dữ liệu cũ trước khi nhập.
-- Hỗ trợ nhập bản sao lưu thành hồ sơ riêng; chưa bảo đảm khôi phục toàn bộ lịch sử hoặc phiên đăng nhập.
-- Yêu cầu Windows 64-bit, .NET Framework 4.x có bộ biên dịch C# và Zalo PC đã cài đặt.
-- Build bằng PowerShell: `.\build.ps1`.
-- Chạy ứng dụng: `.\ZaloManager.exe`.
-- Cập nhật Manager bằng cách đóng cửa sổ Manager và thay `ZaloManager.exe` tại cùng vị trí. Chạy lại file đó để tiếp tục dùng các hồ sơ hiện có. Với mã nguồn, chạy `.\build.ps1` để build và thay file.
-- Cấu hình hồ sơ nằm trong `%LOCALAPPDATA%\ZaloManagerPoC`. Dữ liệu đăng nhập Zalo nằm trong `%APPDATA%` theo từng hồ sơ. Lịch sử tin thu hồi được lưu riêng theo tài khoản trong kho cục bộ mã hóa cho người dùng Windows hiện tại. Đọc tin chỉ bỏ số thông báo, còn nội dung được giữ đến khi bấm Xóa.
-- Khi mở hồ sơ từ Manager, ứng dụng bật CDP trên cổng localhost riêng và theo dõi frame WebSocket. Di chuột lên trạng thái hồ sơ để xem kết nối và bộ đếm frame gửi/nhận.
-- Shortcut tạo từ Manager mở đúng hồ sơ qua Manager để bật CDP cho phiên mới. Với shortcut cũ, chọn **… → Tạo Shortcut** để cập nhật. Nếu hồ sơ hiện **Chưa theo dõi**, dừng rồi mở lại hồ sơ. Listener tự kết nối lại và dừng khi đóng Manager.
-- Bật **Khởi động cùng hệ thống** ở góc trên bên phải để Manager chạy dưới khay khi đăng nhập Windows. Chọn **… → Tự mở khi đăng nhập Windows** ở các clone muốn mở cùng Manager. Manager chờ 8 giây rồi mở từng hồ sơ đã chọn, cách nhau ít nhất 3 giây, và bỏ qua hồ sơ đang chạy. Tắt công tắc chung để dừng lượt tự mở lần đăng nhập sau và giữ các lựa chọn theo hồ sơ.
-- Bấm **Thoát** rồi xác nhận **Thoát hoàn toàn** để lưu dữ liệu và kết thúc Manager. Zalo tiếp tục chạy và Manager bắt đầu theo dõi lại khi được mở.
-- Với Zalo gốc, bật khởi động cùng Windows trong Zalo trước, rồi chọn **… → Theo dõi khi Zalo gốc tự khởi động** trong Manager. Từ lần đăng nhập Windows tiếp theo, trình mở khởi động Zalo gốc với cổng theo dõi cục bộ nếu Thu hồi đang bật. Manager kết nối khi được mở. Tắt tùy chọn để khôi phục lệnh tự khởi động ban đầu của Zalo.
-- Sự kiện C# `CdpMessageWatcher.FrameReceived` cung cấp ID hồ sơ, chiều truyền, opcode và payload trong bộ nhớ. Payload binary dùng Base64. Việc giải mã thành sự kiện tin nhắn Zalo cần được triển khai tiếp.
-- Mã nguồn tại `src/`, giao diện và biểu tượng tại `src/` và `assets/`, kiểm thử tại `tests/`.
+# Zalo Manager
 
-### Kiểm thử tin thu hồi đa phương tiện
+## App này là gì
+Zalo Manager là công cụ chạy và quản lý nhiều tài khoản Zalo PC song song trên cùng một tài khoản Windows. Mỗi hồ sơ clone chạy độc lập trong một box **Sandboxie-Plus** riêng, dùng chung tệp cài đặt Zalo gốc đã xác minh chữ ký số VNG.
 
-Mở đúng hội thoại ở hồ sơ nhận. Manager hiển thị **Đang theo dõi** khi quét được khung chat, **Chờ mở chat** khi đã kết nối CDP nhưng chưa thấy khung chat và **Chưa theo dõi** khi chưa kết nối. Với tệp trong hội thoại đang theo dõi, Manager thử dùng tệp cùng tên ở thư mục `Downloads` của hồ sơ Windows khi kích thước và mã kiểm tra Zalo đều khớp. Nếu thiếu bản đó và có URL CDN hợp lệ, Manager tải qua HTTPS. Giới hạn lưu là 16 MiB cho mỗi nội dung đính kèm. Trong kho Thu hồi, dùng **Đọc tệp** với `.txt`, **Tải về** để xuất tệp hoặc **Nghe** và **Lưu ghi âm** cho bản ghi âm có dữ liệu. Phần đọc `.txt` hỗ trợ UTF-8 và tệp có BOM Unicode đến 256 KiB.
+## Dùng ở đâu
+- Dùng trực tiếp trên máy tính cá nhân hoặc máy làm việc chạy hệ điều hành Windows để quản lý tập trung nhiều tài khoản Zalo mà không cần đăng xuất/đăng nhập lại hoặc tạo nhiều tài khoản Windows khác nhau.
 
-Chạy một lệnh từ thư mục dự án với Node.js 22+ và Windows PowerShell có .NET Framework.
+## Thích hợp với các môi trường nào
+- **Hệ điều hành**: Windows 10 / Windows 11 (x64).
+- **Phần mềm nền**: Đã cài sẵn **Zalo PC** bản chính thức của VNG và **Sandboxie-Plus** (từ v5.74.1 / v1.19.1 trở lên; bộ cài `ZaloManagerSetup.exe` tự cài kèm nếu máy chưa có).
+- **Quyền hạn**: Cần quyền quản trị (Administrator) khi chạy bộ cài đặt `ZaloManagerSetup.exe`.
 
-```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\RecallMedia.Tests.ps1
-```
+## Các chức năng
+- **Nhận diện & đồng bộ Zalo gốc**: Tự động tìm hoặc trỏ chọn thủ công cửa sổ/icon Zalo gốc, kiểm tra chữ ký số VNG và đồng bộ phiên bản mới cho các clone đã dừng.
+- **Tạo & quản lý nhiều hồ sơ clone**: Khởi tạo nhanh box Sandboxie riêng, mở/dừng độc lập từng tài khoản, xóa hồ sơ an toàn (chuyển dữ liệu vào thư mục `Deleted`).
+- **Theo dõi trạng thái & dung lượng**: Hiển thị trạng thái đăng nhập (`Đã đăng nhập` / `Chưa đăng nhập`), trạng thái chạy (`Đang chạy` / `Đã dừng`) và dung lượng dữ liệu thực tế của từng hồ sơ.
+- **Tùy chỉnh hồ sơ (kể cả Zalo gốc)**: Đổi tên hồ sơ, đổi avatar/icon app (tự chọn ảnh hoặc tự động lấy từ tài khoản Zalo hiện tại) khi hồ sơ đã đăng nhập.
+- **Shortcut & Khởi động cùng Windows**: Tạo shortcut riêng cho từng hồ sơ ra Desktop/Start Menu; tùy chọn tự mở Manager và tự mở các clone đã chọn khi đăng nhập Windows.
+- **Sao lưu & di chuyển dữ liệu**: Xuất/nhập dữ liệu hồ sơ qua tệp `.zmdata` có kiểm tra toàn vẹn SHA-256 và đối chiếu đúng ID tài khoản (hỗ trợ nhập đè hoặc nhập thành hồ sơ mới).
+- **Chạy nền khay hệ thống**: Đóng cửa sổ Manager sẽ thu gọn xuống khay hệ thống để các cửa sổ Zalo đang mở tiếp tục hoạt động bình thường.
 
-Lệnh build bản kiểm thử tạm, chạy dữ liệu mô phỏng cho ảnh, sticker, tệp, ghi âm và video, rồi kiểm tra byte lưu lại và nút hiển thị sau khi mở lại kho. Kịch bản cũng thử tệp chưa tải xong lúc thu hồi và tin thiếu nguồn tải. Kết quả `PASS` xác nhận luồng mô phỏng. Kết nối, quyền tải và codec trên Zalo thật nằm ngoài phép thử này.
+## Hướng dẫn cài
+1. Tải và chạy `ZaloManagerSetup.exe` với quyền quản trị (Administrator).
+2. Bộ cài sẽ tự giữ lại Sandboxie-Plus tương thích nếu đã có, hoặc tự cài đặt phiên bản đi kèm và tắt tự mở giao diện Sandboxie.
+3. Sau khi cài xong, mở **Zalo Manager** từ shortcut trên Desktop hoặc Start Menu.
+*(Nếu máy đã cài sẵn Sandboxie-Plus tương thích, có thể chạy trực tiếp `ZaloManager.exe`.)*
 
-Để xác minh kho thật, mở hội thoại trên hồ sơ **nhận**, dùng một tệp mẫu có tên riêng, rồi gửi và thu hồi từ tài khoản gửi trong lúc lệnh sau chờ. Thay `123456` bằng ID hồ sơ nhận, hoặc `original` nếu hồ sơ nhận là Zalo gốc.
+## Cách sử dụng
+1. **Kiểm tra nguồn**: Khi mở app, Manager tự nhận diện Zalo gốc. Nếu chưa thấy, bấm **Trỏ chọn Zalo gốc…** và click vào cửa sổ hoặc icon Zalo trên taskbar.
+2. **Thêm hồ sơ mới**: Nhập tên hồ sơ → bấm **+ Thêm hồ sơ** → bấm **Mở** ở hàng vừa tạo rồi đăng nhập trực tiếp trong cửa sổ Zalo.
+3. **Tùy chỉnh & thao tác nâng cao**: Sau khi hồ sơ đã đăng nhập, bấm nút **`…`** trên hàng hồ sơ để tạo shortcut, bật tự mở cùng Windows, đổi tên/avatar hoặc xuất/nhập dữ liệu `.zmdata`.
+4. **Cập nhật khi Zalo ra bản mới**: Dừng các hồ sơ đang chạy → bấm **Kiểm tra & Đồng bộ** để các clone dùng phiên bản Zalo gốc mới mà vẫn giữ nguyên dữ liệu.
 
-```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\RecallLiveFile.Tests.ps1 -ProfileId 123456 -ExpectedFile .\phase1-lab\ZMC_MEDIA_TEST.txt -WaitSeconds 60
-```
-
-Lệnh xác minh tệp trong đúng kho hồ sơ nhận. `PASS` yêu cầu SHA-256 của bản lưu trùng tệp gốc và ghi nguồn bản sao nếu có. Nếu chỉ có tên, lệnh báo lỗi kèm trạng thái thu bản sao. Các thao tác gửi và thu hồi thực hiện trong Zalo.
-
-- Di chuột lên trạng thái hồ sơ để xem tin văn bản mới nhất trong hội thoại Zalo đang mở, cùng chiều gửi/nhận. Manager chỉ theo dõi khi đang chạy và giữ bản xem trước trong bộ nhớ.
+## Lưu ý khi dùng
+- Đóng các hồ sơ clone trước khi **Đồng bộ**, **Xuất/Nhập data** hoặc **Xóa hồ sơ** để tránh lỗi khóa tệp.
+- Các nút tùy chỉnh (`Tạo shortcut`, đổi tên/avatar, xuất/nhập data) chỉ khả dụng sau khi hồ sơ đã đăng nhập.
+- Xuất/nhập `.zmdata` chỉ áp dụng cho hồ sơ clone cùng phiên bản Zalo; không bao gồm tệp tải xuống nằm ngoài thư mục dữ liệu hoặc dữ liệu chỉ lưu trên cloud.
+- Không xóa thủ công thư mục `C:\Users\<tên>\AppData\Local\ZaloManagerPoC\Sandboxie` nếu đang sử dụng các hồ sơ clone.
+- Bấm nút **×** trên cửa sổ Manager chỉ ẩn xuống khay hệ thống; muốn tắt hẳn ứng dụng, hãy chọn **Thoát** ở góc trên bên phải hoặc chuột phải icon khay hệ thống → **Thoát hoàn toàn**.

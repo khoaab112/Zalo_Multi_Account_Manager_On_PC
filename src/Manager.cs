@@ -32,22 +32,22 @@ namespace ZaloManagerPoc
         [DataMember] public string InstalledVersion { get; set; }
         [DataMember] public string AvatarPath { get; set; }
         [DataMember] public string ShortcutPath { get; set; }
-        [DataMember] public int PatchRevision { get; set; }
         [DataMember(EmitDefaultValue = false)] public bool StartWithWindows { get; set; }
         public bool IsOriginal { get { return Id == "original"; } }
         public string Status { get; set; }
+        public bool IsLoggedIn { get; set; }
         public string UpdateStatus { get; set; }
         internal StorageMeasurement MeasuredStorage { get; set; }
         public string StorageUsage { get { return MeasuredStorage == null ? null : MeasuredStorage.Text; } }
         public string StorageDetails { get { return MeasuredStorage == null ? null : MeasuredStorage.Details; } }
-        public string CdpStatus { get { return CdpMessageWatcher.GetStatus(this); } }
-        public int RecalledCount { get { return CdpMessageWatcher.GetRecalledCount(Id); } }
-        public Visibility RecalledBadgeVisibility { get { return RecalledCount > 0 ? Visibility.Visible : Visibility.Collapsed; } }
-        public string DataPath { get { return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), IsOriginal ? "ZaloData" : "zm" + Id); } }
+        [DataMember(EmitDefaultValue = false)] public bool UsesSandboxie { get; set; }
+        internal string LegacyDataPath { get { return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "zm" + Id); } }
+        public string DataPath { get { return IsOriginal ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "ZaloData") :
+            UsesSandboxie ? SandboxieClone.DataPath(this) : LegacyDataPath; } }
         public string DirectoryPath { get { return ActiveDirectory ?? Path.Combine(Store.Root, "Instances", Id); } }
-        public string Executable { get { return Path.Combine(IsOriginal ? Source : DirectoryPath, "Zalo.exe"); } }
+        public string Executable { get { return Path.Combine(IsOriginal || UsesSandboxie ? Source : DirectoryPath, "Zalo.exe"); } }
         public string Version { get { return InstalledVersion ?? Path.GetFileName(Source); } }
-        public string SubLabel { get { return IsOriginal ? "Bản cài đặt chuẩn" : "Hồ sơ độc lập"; } }
+        public string SubLabel { get { return IsOriginal ? "Bản cài đặt chuẩn" : UsesSandboxie ? "Sandboxie-Plus" : "Hồ sơ phiên bản cũ"; } }
         public string Initials
         {
             get
@@ -57,36 +57,41 @@ namespace ZaloManagerPoc
                 return words.Length == 0 ? "Z" : (words[0].Substring(0, 1) + (words.Length > 1 ? words[words.Length - 1].Substring(0, 1) : "")).ToUpperInvariant();
             }
         }
+        private string cachedAvatarPath;
+        private Brush cachedAvatarBrush;
         public Brush AvatarBackground
         {
             get
             {
                 if (!String.IsNullOrEmpty(AvatarPath) && File.Exists(AvatarPath))
                 {
+                    if (cachedAvatarBrush != null && String.Equals(cachedAvatarPath, AvatarPath, StringComparison.OrdinalIgnoreCase))
+                        return cachedAvatarBrush;
                     try
                     {
                         var bitmap = new System.Windows.Media.Imaging.BitmapImage(); bitmap.BeginInit(); bitmap.CacheOption = System.Windows.Media.Imaging.BitmapCacheOption.OnLoad;
                         bitmap.UriSource = new Uri(AvatarPath); bitmap.EndInit(); bitmap.Freeze();
-                        return new ImageBrush(bitmap) { Stretch = Stretch.UniformToFill };
+                        var brush = new ImageBrush(bitmap) { Stretch = Stretch.UniformToFill };
+                        brush.Freeze();
+                        cachedAvatarPath = AvatarPath;
+                        cachedAvatarBrush = brush;
+                        return brush;
                     }
                     catch (IOException) { }
                     catch (NotSupportedException) { }
                 }
+                cachedAvatarPath = null;
+                cachedAvatarBrush = null;
                 return new SolidColorBrush(IsOriginal ? Color.FromRgb(0, 104, 255) : Color.FromRgb(14, 165, 233));
             }
         }
         public Visibility InitialsVisibility { get { return !String.IsNullOrEmpty(AvatarPath) && File.Exists(AvatarPath) ? Visibility.Collapsed : Visibility.Visible; } }
-        public string StatusText
-        {
-            get
-            {
-                if (Status != "Đang chạy") return "○ " + (Status ?? "Đã dừng");
-                if (!CdpMessageWatcher.IsRecallEnabled(Id)) return "Đã tắt theo dõi";
-                return CdpMessageWatcher.IsTracking(this) ? "● Đang theo dõi" : "Chưa sẵn sàng";
-            }
-        }
-        public string StatusBackground { get { return Status == "Đang chạy" ? (CdpMessageWatcher.HasOpenConversation(this) ? "#ECFDF5" : "#FFFBEB") : "#F1F5F9"; } }
-        public string StatusForeground { get { return Status == "Đang chạy" ? (CdpMessageWatcher.HasOpenConversation(this) ? "#059669" : "#92400E") : "#64748B"; } }
+        public string StatusText { get { return (Status == "Đang chạy" ? "● " : "○ ") + (Status ?? "Đã dừng"); } }
+        public string StatusBackground { get { return Status == "Đang chạy" ? "#ECFDF5" : "#F1F5F9"; } }
+        public string StatusForeground { get { return Status == "Đang chạy" ? "#059669" : "#64748B"; } }
+        public string LoginStatusText { get { return IsLoggedIn ? "Đã đăng nhập" : "Chưa đăng nhập"; } }
+        public string LoginStatusBackground { get { return IsLoggedIn ? "#EFF6FF" : "#FFFBEB"; } }
+        public string LoginStatusForeground { get { return IsLoggedIn ? "#1D4ED8" : "#B45309"; } }
         public string UpdateBackground { get { return IsOriginal ? "#EFF6FF" : (UpdateStatus ?? "").Contains("lỗi") ? "#FEF2F2" : (UpdateStatus ?? "").Contains("Đã đồng bộ") ? "#ECFDF5" : "#FFFBEB"; } }
         public string UpdateForeground { get { return IsOriginal ? "#1D4ED8" : (UpdateStatus ?? "").Contains("lỗi") ? "#DC2626" : (UpdateStatus ?? "").Contains("Đã đồng bộ") ? "#059669" : "#B45309"; } }
     }
@@ -186,6 +191,7 @@ namespace ZaloManagerPoc
     {
         public static readonly string Root = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ZaloManagerPoC");
         private static readonly string FilePath = Path.Combine(Root, "profiles.json");
+        private static readonly string OriginalFilePath = Path.Combine(Root, "original-profile.json");
         public static List<Profile> Load()
         {
             Directory.CreateDirectory(Root);
@@ -230,6 +236,44 @@ namespace ZaloManagerPoc
             if (File.Exists(FilePath)) File.Replace(temporary, FilePath, FilePath + ".bak");
             else File.Move(temporary, FilePath);
         }
+        public static Profile ApplyOriginal(Profile original)
+        {
+            if (original == null || !File.Exists(OriginalFilePath)) return original;
+            try
+            {
+                using (var stream = File.OpenRead(OriginalFilePath))
+                {
+                    var saved = (Profile)new DataContractJsonSerializer(typeof(Profile)).ReadObject(stream);
+                    if (saved != null)
+                    {
+                        if (!String.IsNullOrWhiteSpace(saved.Name)) original.Name = saved.Name;
+                        if (!String.IsNullOrEmpty(saved.AvatarPath)) original.AvatarPath = saved.AvatarPath;
+                        if (!String.IsNullOrEmpty(saved.ShortcutPath)) original.ShortcutPath = saved.ShortcutPath;
+                    }
+                }
+            }
+            catch (Exception error) { Log(error); }
+            return original;
+        }
+        public static void SaveOriginal(Profile original)
+        {
+            if (original == null) return;
+            Directory.CreateDirectory(Root);
+            string temporary = OriginalFilePath + ".tmp";
+            using (var stream = new FileStream(temporary, FileMode.Create, FileAccess.Write, FileShare.None))
+            {
+                new DataContractJsonSerializer(typeof(Profile)).WriteObject(stream, new Profile
+                {
+                    Id = "original",
+                    Name = original.Name,
+                    AvatarPath = original.AvatarPath,
+                    ShortcutPath = original.ShortcutPath
+                });
+                stream.Flush(true);
+            }
+            if (File.Exists(OriginalFilePath)) File.Replace(temporary, OriginalFilePath, null);
+            else File.Move(temporary, OriginalFilePath);
+        }
         public static void Log(Exception exception)
         {
             File.AppendAllText(Path.Combine(Root, "manager.log"), DateTimeOffset.Now.ToString("o") + " " + exception + Environment.NewLine);
@@ -257,100 +301,28 @@ namespace ZaloManagerPoc
                 return BitConverter.ToString(sha.ComputeHash(stream)).Replace("-", "");
         }
 
-        private static int ReadAsarHeader(Stream stream, out bool hasIntegrity)
-        {
-            using (var reader = new BinaryReader(stream, Encoding.UTF8, true))
-            {
-                if (stream.Length < 16 || reader.ReadUInt32() != 4)
-                    throw new InvalidDataException("Định dạng ASAR chưa được hỗ trợ.");
-                long payload = 8L + reader.ReadUInt32();
-                reader.ReadUInt32();
-                long headerLength = reader.ReadUInt32();
-                if (payload > stream.Length || payload > Int32.MaxValue || payload < 16 ||
-                    headerLength <= 0 || headerLength > payload - 16)
-                    throw new InvalidDataException("Header ASAR không hợp lệ.");
-                byte[] header = reader.ReadBytes((int)headerLength);
-                if (header.Length != headerLength) throw new InvalidDataException("Header ASAR không đầy đủ.");
-                hasIntegrity = Encoding.UTF8.GetString(header).Contains("\"integrity\"");
-                return (int)payload;
-            }
-        }
-
-        internal static bool SupportsCloneSource(string directory)
-        {
-            using (var stream = File.OpenRead(Path.Combine(directory, "resources", "app.asar")))
-            {
-                bool hasIntegrity;
-                ReadAsarHeader(stream, out hasIntegrity);
-                return !hasIntegrity;
-            }
-        }
-
-        // Equal-length substitutions preserve ASAR file offsets. Only payload bytes are changed.
-        public static byte[] Patch(byte[] source, string id)
-        {
-            int payload;
-            bool hasIntegrity;
-            using (var stream = new MemoryStream(source, false)) payload = ReadAsarHeader(stream, out hasIntegrity);
-            if (hasIntegrity) throw new InvalidDataException("Phiên bản ASAR có kiểm tra integrity. Cần đánh giá tương thích riêng.");
-            byte[] result = (byte[])source.Clone();
-            Replace(result, payload, "ZaloData", "zm" + id, true);
-            Replace(result, payload, "com.vng.zalo", "zmgr.p" + id, true);
-            Replace(result, payload, "PipeZCallSend", "ZMC_S_" + id + "_", true);
-            Replace(result, payload, "PipeZCallRecv", "ZMC_R_" + id + "_", true);
-            string script = Encoding.ASCII.GetString(result, payload, result.Length - payload);
-            var exits = System.Text.RegularExpressions.Regex.Matches(script,
-                @"\[""restart process"",""[^""]+""\]\),0===([a-zA-Z_$][a-zA-Z0-9_$]*)\?([a-zA-Z_$][a-zA-Z0-9_$]*\(\)):");
-            foreach (System.Text.RegularExpressions.Match match in exits)
-            {
-                var call = match.Groups[2];
-                string replacement = "0" + new string(' ', call.Length - 1);
-                Buffer.BlockCopy(Encoding.ASCII.GetBytes(replacement), 0, result, payload + call.Index, call.Length);
-            }
-            return result;
-        }
-
-        private static void Replace(byte[] bytes, int start, string oldValue, string newValue, bool required)
-        {
-            byte[] before = Encoding.ASCII.GetBytes(oldValue);
-            byte[] after = Encoding.ASCII.GetBytes(newValue);
-            if (before.Length != after.Length) throw new InvalidOperationException("Độ dài chuỗi thay thế khác nhau.");
-            int count = 0;
-            for (int i = start; i <= bytes.Length - before.Length; i++)
-            {
-                if (bytes[i] != before[0]) continue;
-                int j = 1;
-                while (j < before.Length && bytes[i + j] == before[j]) j++;
-                if (j != before.Length) continue;
-                Buffer.BlockCopy(after, 0, bytes, i, after.Length);
-                count++;
-                i += before.Length - 1;
-            }
-            if (required && count == 0) throw new InvalidDataException("Không tìm thấy dấu hiệu tương thích: " + oldValue);
-        }
-
         public static void Prepare(Profile profile)
         {
-            string version = FileVersionInfo.GetVersionInfo(Path.Combine(profile.Source, "Zalo.exe")).FileVersion;
-            if (IsRunning(profile)) throw new InvalidOperationException("Hồ sơ đang chạy.");
-            if (Directory.Exists(profile.DirectoryPath))
-                throw new IOException("Thư mục hồ sơ đã tồn tại. Không thể ghi đè: " + profile.DirectoryPath);
-            string sourceAsar = Path.Combine(profile.Source, "resources", "app.asar");
-            string sourceHash = Hash(sourceAsar);
-            byte[] patched = Patch(File.ReadAllBytes(sourceAsar), profile.Id);
-            string staging = profile.DirectoryPath + ".preparing";
-            if (Directory.Exists(staging)) throw new IOException("Có lần chuẩn bị chưa hoàn tất: " + staging);
-            Directory.CreateDirectory(staging);
-            CopyDirectory(profile.Source, staging);
-            string cloneAsar = Path.Combine(staging, "resources", "app.asar");
-            if (Hash(cloneAsar) != sourceHash || Hash(sourceAsar) != sourceHash)
-                throw new IOException("Zalo vừa cập nhật trong lúc sao chép. Hãy thử lại với hồ sơ mới.");
-            File.WriteAllBytes(cloneAsar, patched);
-            profile.SourceHash = sourceHash;
-            profile.PatchedHash = Hash(cloneAsar);
-            profile.InstalledVersion = version;
-            profile.PatchRevision = 4;
-            Directory.Move(staging, profile.DirectoryPath);
+            Original.Validate(profile.Source);
+            profile.SourceHash = Hash(Path.Combine(profile.Source, "resources", "app.asar"));
+            profile.InstalledVersion = FileVersionInfo.GetVersionInfo(Path.Combine(profile.Source, "Zalo.exe")).FileVersion;
+            SandboxieClone.Configure(profile);
+            profile.UsesSandboxie = true;
+        }
+
+        public static bool IsLoggedIn(Profile profile)
+        {
+            if (profile == null) return false;
+            string dataPath = profile.DataPath;
+            if (String.IsNullOrEmpty(dataPath) || !Directory.Exists(dataPath)) return false;
+            try
+            {
+                return Directory.EnumerateFiles(dataPath, "ftsm_*.db")
+                    .Select(path => Path.GetFileNameWithoutExtension(path).Substring(5))
+                    .Any(id => id.Length > 0 && id.All(Char.IsDigit));
+            }
+            catch (IOException) { return false; }
+            catch (UnauthorizedAccessException) { return false; }
         }
 
         public static bool IsRunning(Profile profile)
@@ -360,17 +332,32 @@ namespace ZaloManagerPoc
             finally { foreach (var process in processes) process.Dispose(); }
         }
 
-        // Publish new binaries by changing metadata only after a complete, verified copy.
-        // The previous generation remains usable if preparing or saving the update fails.
         public static Profile PrepareUpdate(Profile profile, OriginalInstallation original)
         {
             if (IsRunning(profile)) throw new InvalidOperationException("Hồ sơ đang chạy, chờ thoát Zalo để cập nhật.");
-            var next = new Profile { Id = profile.Id, Name = profile.Name, AvatarPath = profile.AvatarPath, ShortcutPath = profile.ShortcutPath, Source = original.DirectoryPath,
-                StartWithWindows = profile.StartWithWindows,
-                ActiveDirectory = Path.Combine(Store.Root, "Releases", profile.Id, Guid.NewGuid().ToString("N")) };
+            var next = new Profile
+            {
+                Id = profile.Id, Name = profile.Name, AvatarPath = profile.AvatarPath, ShortcutPath = profile.ShortcutPath,
+                Source = original.DirectoryPath, StartWithWindows = profile.StartWithWindows
+            };
             Prepare(next);
             if (next.SourceHash != original.PackageHash || next.InstalledVersion != original.Version)
-                throw new IOException("Nguồn Zalo đã thay đổi trong lúc cập nhật. Chờ lần kiểm tra tiếp theo.");
+                throw new IOException("Nguồn Zalo đã thay đổi trong lúc cập nhật.");
+            if (!profile.UsesSandboxie && Directory.Exists(profile.DataPath) && !Directory.Exists(next.DataPath))
+            {
+                string staging = next.DataPath + ".migration-" + Guid.NewGuid().ToString("N");
+                try
+                {
+                    CopyDirectory(profile.DataPath, staging);
+                    if (IsRunning(profile)) throw new IOException("Hồ sơ cũ vừa mở lại. Hãy dừng trước khi sao chép dữ liệu.");
+                    Directory.Move(staging, next.DataPath);
+                }
+                catch
+                {
+                    if (Directory.Exists(staging)) Directory.Delete(staging, true);
+                    throw;
+                }
+            }
             return next;
         }
 
@@ -403,23 +390,30 @@ namespace ZaloManagerPoc
             return roots;
         }
 
+        private static bool OwnsProcess(Profile profile, string path, string box)
+        {
+            if (profile.UsesSandboxie)
+                return String.Equals(box, SandboxieClone.BoxName(profile), StringComparison.OrdinalIgnoreCase);
+            return String.IsNullOrEmpty(box) && ProcessRoots(profile).Any(root => path.StartsWith(root, StringComparison.OrdinalIgnoreCase));
+        }
+
         public static List<Process> Processes(Profile profile)
         {
             var found = new List<Process>();
-            var roots = ProcessRoots(profile);
-            foreach (var process in Process.GetProcesses())
+            try
             {
-                try
+                foreach (int id in ScanProfileProcesses(new[] { profile })[profile])
                 {
-                    string path = GetRuntimeProcessPath(process);
-                    if (path != null && roots.Any(root => path.StartsWith(root, StringComparison.OrdinalIgnoreCase)))
-                    { found.Add(process); continue; }
+                    try { found.Add(Process.GetProcessById(id)); }
+                    catch (ArgumentException) { }
                 }
-                catch (System.ComponentModel.Win32Exception) { }
-                catch (InvalidOperationException) { }
-                process.Dispose();
+                return found;
             }
-            return found;
+            catch
+            {
+                foreach (var process in found) process.Dispose();
+                throw;
+            }
         }
 
         private static string GetRuntimeProcessPath(Process process)
@@ -438,34 +432,30 @@ namespace ZaloManagerPoc
 
         internal static Dictionary<Profile, int[]> ScanProfileProcesses(Profile[] profiles)
         {
-            var paths = new List<KeyValuePair<int, string>>();
+            var paths = new List<Tuple<int, string, string>>();
             foreach (var process in Process.GetProcesses())
             using (process)
             {
                 try
                 {
                     var path = GetRuntimeProcessPath(process);
-                    if (path != null) paths.Add(new KeyValuePair<int, string>(process.Id, path));
+                    if (path != null) paths.Add(Tuple.Create(process.Id, path, SandboxieClone.ProcessBox(process.Id)));
                 }
                 catch (System.ComponentModel.Win32Exception) { }
                 catch (InvalidOperationException) { }
             }
-            return profiles.ToDictionary(profile => profile, profile =>
-            {
-                var roots = ProcessRoots(profile);
-                return paths.Where(entry => roots.Any(root => entry.Value.StartsWith(root,
-                    StringComparison.OrdinalIgnoreCase))).Select(entry => entry.Key).ToArray();
-            });
+            return profiles.ToDictionary(profile => profile, profile => paths
+                .Where(entry => OwnsProcess(profile, entry.Item2, entry.Item3)).Select(entry => entry.Item1).ToArray());
         }
 
-        public static void Open(Profile profile, bool track = true)
+        public static void Open(Profile profile)
         {
-            OpenAndCheckWindow(profile, track);
+            OpenAndCheckWindow(profile);
         }
 
-        internal static bool OpenAndCheckWindow(Profile profile, bool track = true)
+        internal static bool OpenAndCheckWindow(Profile profile)
         {
-            return WithLaunchLock(profile, () => OpenProfile(profile, track), CancellationToken.None);
+            return WithLaunchLock(profile, () => OpenProfile(profile, CancellationToken.None, true), CancellationToken.None);
         }
 
         private static bool WithLaunchLock(Profile profile, Func<bool> open, CancellationToken token)
@@ -496,74 +486,30 @@ namespace ZaloManagerPoc
             return WithLaunchLock(profile, delegate
             {
                 if (profile.IsOriginal || IsRunning(profile)) return false;
-                using (var process = StartProfileProcess(profile, true, false, token))
-                {
-                    for (int attempt = 0; attempt < 20; attempt++)
-                    {
-                        if (token.WaitHandle.WaitOne(500)) token.ThrowIfCancellationRequested();
-                        process.Refresh();
-                        if (process.HasExited || process.MainWindowHandle != IntPtr.Zero) break;
-                    }
-                }
+                OpenProfile(profile, token, false);
                 return true;
             }, token);
         }
 
-        internal static void StartOriginalAtLogon(Profile profile, bool enableCdp)
+        private static bool OpenProfile(Profile profile, CancellationToken token, bool activate)
         {
-            WithLaunchLock(profile, delegate
+            if (IsRunning(profile) && (!activate || WindowActivation.Restore(profile))) return true;
+            token.ThrowIfCancellationRequested();
+            if (profile.UsesSandboxie) SandboxieClone.Start(profile);
+            else if (profile.IsOriginal) StartNativeOriginal(profile);
+            else
             {
-                if (IsRunning(profile)) return false;
-                StartOriginalProcess(profile, enableCdp);
-                return true;
-            }, CancellationToken.None);
-        }
-
-        private static bool OpenProfile(Profile profile, bool track)
-        {
-            bool running = IsRunning(profile);
-            if (profile.IsOriginal)
-            {
-                bool visible = running && WindowActivation.Restore(profile);
-                if (running)
-                {
-                    if (!visible) StartNativeOriginal(profile);
-                }
-                else StartOriginalProcess(profile, CdpMessageWatcher.IsRecallEnabled(profile.Id));
-                if (track) CdpMessageWatcher.Start(profile, 0);
-                return visible || WaitForProfileWindow(profile);
+                if (String.IsNullOrEmpty(profile.PatchedHash) || Hash(Path.Combine(profile.DirectoryPath, "resources", "app.asar")) != profile.PatchedHash)
+                    throw new InvalidDataException("Hãy chọn Kiểm tra & Đồng bộ để đưa hồ sơ sang Sandboxie.");
+                using (Process.Start(new ProcessStartInfo(profile.Executable)
+                    { WorkingDirectory = profile.DirectoryPath, UseShellExecute = false })) { }
             }
-            int runningPort = running ? CdpMessageWatcher.FindPort(profile) : 0;
-            if (running && runningPort > 0 && WindowActivation.Restore(profile))
-            {
-                if (track) CdpMessageWatcher.Start(profile, runningPort);
-                return true;
-            }
-            if (running && runningPort == 0)
-            {
-                Stop(profile);
-                running = false;
-            }
-            using (StartProfileProcess(profile, track, running, CancellationToken.None)) { }
-            return WaitForProfileWindow(profile);
-        }
-
-        private static bool WaitForProfileWindow(Profile profile)
-        {
             for (int attempt = 0; attempt < 40; attempt++)
-            { System.Threading.Thread.Sleep(250); if (WindowActivation.Restore(profile)) return true; }
-            return false;
-        }
-
-        private static void StartOriginalProcess(Profile profile, bool enableCdp)
-        {
-            if (enableCdp)
             {
-                using (var process = StartProfileProcess(profile, false, false, CancellationToken.None))
-                    if (!process.WaitForExit(2000)) return;
-                if (IsRunning(profile)) return;
+                if (token.WaitHandle.WaitOne(250)) token.ThrowIfCancellationRequested();
+                if (activate ? WindowActivation.Restore(profile) : IsRunning(profile)) return true;
             }
-            StartNativeOriginal(profile);
+            return false;
         }
 
         private static void StartNativeOriginal(Profile profile)
@@ -586,41 +532,18 @@ namespace ZaloManagerPoc
             using (Process.Start(startInfo)) { }
         }
 
-        private static Process StartProfileProcess(Profile profile, bool track, bool running, CancellationToken token)
-        {
-            if (!profile.IsOriginal && (String.IsNullOrEmpty(profile.PatchedHash) || Hash(Path.Combine(profile.DirectoryPath, "resources", "app.asar")) != profile.PatchedHash))
-                throw new InvalidDataException("Gói ứng dụng đã thay đổi hoặc chuẩn bị chưa hoàn tất. Cần kiểm tra tương thích trước khi mở.");
-            // Use Zalo's own single-instance handler for a tray-only session.
-            // A crashed Electron main process can leave helpers behind. Pass a fresh
-            // port even when those helpers made the profile appear to be running.
-            int port = CdpMessageWatcher.AllocatePort();
-            var startInfo = new ProcessStartInfo(profile.Executable)
-            {
-                WorkingDirectory = Path.GetDirectoryName(profile.Executable),
-                UseShellExecute = false,
-                Arguments = "--remote-debugging-address=127.0.0.1 --remote-debugging-port=" + port
-            };
-            startInfo.EnvironmentVariables.Remove("ELECTRON_RUN_AS_NODE");
-            token.ThrowIfCancellationRequested();
-            var process = Process.Start(startInfo);
-            try
-            {
-                if (track) CdpMessageWatcher.Start(profile, running ? 0 : port);
-                return process;
-            }
-            catch { if (process != null) process.Dispose(); throw; }
-        }
-
-        public static void Close(Profile profile)
-        {
-            var running = Processes(profile);
-            try { foreach (var process in running) process.CloseMainWindow(); }
-            finally { foreach (var process in running) process.Dispose(); }
-        }
-
         public static void Stop(Profile profile)
         {
-            CdpMessageWatcher.Stop(profile);
+            if (profile.UsesSandboxie)
+            {
+                SandboxieClone.Stop(profile);
+                for (int attempt = 0; attempt < 20; attempt++)
+                {
+                    if (!IsRunning(profile)) return;
+                    Thread.Sleep(250);
+                }
+                throw new IOException("Box Sandboxie vẫn còn tiến trình.");
+            }
             Exception failure = null;
             for (int attempt = 0; attempt < 6; attempt++)
             {
@@ -660,10 +583,9 @@ namespace ZaloManagerPoc
         private readonly Button detectButton = new Button { Content = "Kiểm tra Zalo gốc / đồng bộ", Padding = new Thickness(12, 7, 12, 7) };
         private bool busy;
         private bool loadingOnStartup = true;
-        private readonly Dictionary<Profile, string> displayedCdpStatus = new Dictionary<Profile, string>();
         public ManagerWindow() : this(false) { }
 
-        internal ManagerWindow(bool windowsLogon, bool recallInitialized = false)
+        internal ManagerWindow(bool windowsLogon)
         {
             deferStartupStorage = windowsLogon;
             profiles = new ObservableCollection<Profile>(Store.Load());
@@ -673,7 +595,7 @@ namespace ZaloManagerPoc
             var panel = new DockPanel { Margin = new Thickness(24) }; Content = panel;
             var header = new StackPanel(); DockPanel.SetDock(header, Dock.Top); panel.Children.Add(header);
             header.Children.Add(new TextBlock { Text = "Quản lý hồ sơ Zalo", FontSize = 26, FontWeight = FontWeights.SemiBold });
-            header.Children.Add(new TextBlock { Text = "Mỗi hồ sơ có bản sao chương trình và thư mục dữ liệu riêng. Đăng nhập trực tiếp trong cửa sổ Zalo.", Margin = new Thickness(0, 8, 0, 0), TextWrapping = TextWrapping.Wrap });
+            header.Children.Add(new TextBlock { Text = "Các hồ sơ dùng chung bản Zalo gốc và có dữ liệu riêng. Đăng nhập trực tiếp trong cửa sổ Zalo.", Margin = new Thickness(0, 8, 0, 0), TextWrapping = TextWrapping.Wrap });
             header.Children.Add(originalText);
             detectButton.Click += async delegate { await Synchronize(true); };
             sourceToolbar.Children.Add(detectButton);
@@ -730,7 +652,7 @@ namespace ZaloManagerPoc
             status.Text = "PoC · Thoát ứng dụng quản lý để các cửa sổ Zalo tiếp tục chạy. Nút đóng gửi yêu cầu đóng cửa sổ, Zalo có thể thu nhỏ xuống khay hệ thống.";
             timer.Tick += delegate { if (!busy) UpdateProfileStatus(false); };
             timer.Start(); RefreshStatus();
-            Loaded += async delegate { await Synchronize(false, false, !recallInitialized); };
+            Loaded += async delegate { await Synchronize(false, false); };
             Loaded += delegate { TrayManager.Initialize(this); };
             Closing += delegate(object sender, System.ComponentModel.CancelEventArgs args)
             {
@@ -738,20 +660,9 @@ namespace ZaloManagerPoc
                 if (busy) { args.Cancel = true; status.Text = "Đang chuẩn bị phiên bản. Chờ hoàn tất để đóng ứng dụng."; return; }
                 args.Cancel = true;
                 TrayManager.HideToTray();
-                TrayManager.ShowBalloon("Zalo Manager", "Ứng dụng đang chạy ngầm ở khay hệ thống để tiếp tục theo dõi tin nhắn thu hồi.");
+                TrayManager.ShowBalloon("Zalo Manager", "Ứng dụng đang chạy ở khay hệ thống.");
             };
-            Action refreshRecallBadges = delegate
-            {
-                Dispatcher.BeginInvoke(new Action(() => grid.Items.Refresh()));
-            };
-            CdpMessageWatcher.RecalledMessagesChanged += refreshRecallBadges;
-            Closed += delegate
-            {
-                CdpMessageWatcher.RecalledMessagesChanged -= refreshRecallBadges;
-                CloseStorageMonitoring();
-                timer.Stop();
-                CdpMessageWatcher.StopAll();
-            };
+            Closed += delegate { CloseStorageMonitoring(); timer.Stop(); };
             ApplyModernLayout();
         }
         protected override void OnSourceInitialized(EventArgs e)
@@ -802,7 +713,7 @@ namespace ZaloManagerPoc
             }
         }
 
-        private async Task Synchronize(bool force = false, bool updateClones = true, bool initializeRecall = false)
+        private async Task Synchronize(bool force = false, bool updateClones = true)
         {
             if (busy) return;
             SetBusy(true);
@@ -811,31 +722,14 @@ namespace ZaloManagerPoc
             try
             {
                 if (force) Original.Invalidate();
-                var original = await Task.Run(() =>
-                {
-                    if (initializeRecall)
-                    {
-                        CdpMessageWatcher.IncomingMessageCache.Initialize();
-                        CdpMessageWatcher.ScheduleRecallMediaScan();
-                    }
-                    return Original.Detect();
-                });
+                var original = await Task.Run(() => Original.Detect());
                 ShowOriginal(original);
-                originalRow = new Profile { Id = "original", Name = "Zalo gốc", Source = original.DirectoryPath, InstalledVersion = original.Version, UpdateStatus = "Nguồn nhân bản" };
-                if (!await Task.Run(() => Instance.SupportsCloneSource(original.DirectoryPath)))
-                {
-                    foreach (var profile in profiles)
-                        profile.UpdateStatus = String.IsNullOrEmpty(profile.PatchedHash) ? "Chưa tạo được" : "Giữ bản đang dùng";
-                    await visibleLoading;
-                    SetSourceResult("•", "Zalo gốc " + original.Version + " có kiểm tra toàn vẹn ASAR. Manager chưa hỗ trợ tạo hoặc cập nhật clone từ bản này.", Brushes.DarkGoldenrod, false);
-                    status.Text = "Bạn vẫn có thể mở các hồ sơ clone đã chuẩn bị.";
-                    return;
-                }
+                originalRow = Store.ApplyOriginal(new Profile { Id = "original", Name = "Zalo gốc", Source = original.DirectoryPath, InstalledVersion = original.Version, UpdateStatus = "Nguồn nhân bản" });
                 int failed = 0, waiting = 0;
                 foreach (var profile in profiles.ToList())
                 {
-                    if (profile.SourceHash == original.PackageHash &&
-                        (profile.InstalledVersion ?? original.Version) == original.Version && profile.PatchRevision >= 4)
+                    if (profile.UsesSandboxie && profile.SourceHash == original.PackageHash &&
+                        profile.InstalledVersion == original.Version && String.Equals(profile.Source, original.DirectoryPath, StringComparison.OrdinalIgnoreCase))
                     { profile.UpdateStatus = "Đã đồng bộ"; continue; }
                     if (!updateClones) { profile.UpdateStatus = "Có bản cập nhật · bấm Kiểm tra để đồng bộ"; continue; }
                     if (Instance.IsRunning(profile))
@@ -905,7 +799,6 @@ namespace ZaloManagerPoc
             {
                 rows.Clear();
                 foreach (var row in displayed) rows.Add(row);
-                displayedCdpStatus.Clear();
                 profileStorageRefreshRequested = true;
             }
             if (loadingOnStartup) return;
@@ -918,7 +811,17 @@ namespace ZaloManagerPoc
             var snapshotRows = rows.ToArray();
             processStatusScanning = true;
             Dictionary<Profile, int[]> snapshot;
-            try { snapshot = await Task.Run(() => Instance.ScanProfileProcesses(snapshotRows)).ConfigureAwait(false); }
+            Dictionary<Profile, bool> loginStates = null;
+            try
+            {
+                snapshot = await Task.Run(() =>
+                {
+                    var procs = Instance.ScanProfileProcesses(snapshotRows);
+                    loginStates = snapshotRows.ToDictionary(p => p, p =>
+                        (p.IsLoggedIn && procs[p].Length == 0 && !refreshGrid) ? p.IsLoggedIn : Instance.IsLoggedIn(p));
+                    return procs;
+                }).ConfigureAwait(false);
+            }
             catch (Exception error)
             {
                 Store.Log(error);
@@ -929,13 +832,13 @@ namespace ZaloManagerPoc
                 await Dispatcher.InvokeAsync(new Action(delegate
                 {
                     processStatusScanning = false;
-                    if (snapshot != null) ApplyProcessStatus(snapshotRows, snapshot, changed || refreshGrid);
+                    if (snapshot != null) ApplyProcessStatus(snapshotRows, snapshot, loginStates, changed || refreshGrid);
                 })).Task.ConfigureAwait(false);
             }
             catch (TaskCanceledException) { }
         }
 
-        private void ApplyProcessStatus(Profile[] snapshotRows, Dictionary<Profile, int[]> snapshot, bool changed)
+        private void ApplyProcessStatus(Profile[] snapshotRows, Dictionary<Profile, int[]> snapshot, Dictionary<Profile, bool> loginStates, bool changed)
         {
             if (TrayManager.IsExiting || Dispatcher.HasShutdownStarted) return;
             if (processStatusRefreshRequested || !rows.SequenceEqual(snapshotRows))
@@ -952,21 +855,19 @@ namespace ZaloManagerPoc
                     try { running.Add(Process.GetProcessById(id)); }
                     catch (ArgumentException) { }
                 }
-                string nextStatus = running.Count > 0 ? "Đang chạy" : (!profile.IsOriginal && profile.PatchedHash == null ? "Chuẩn bị chưa xong" : "Đã dừng");
+                string nextStatus = running.Count > 0 ? "Đang chạy" : (!profile.IsOriginal && !profile.UsesSandboxie && profile.PatchedHash == null ? "Chuẩn bị chưa xong" : "Đã dừng");
                 changed |= profile.Status != nextStatus;
                 profile.Status = nextStatus;
-                if (running.Count > 0) CdpMessageWatcher.Start(profile, 0);
-                else CdpMessageWatcher.Stop(profile);
+                bool nextLoggedIn = loginStates != null && loginStates.ContainsKey(profile) && loginStates[profile];
+                changed |= profile.IsLoggedIn != nextLoggedIn;
+                profile.IsLoggedIn = nextLoggedIn;
                 try
                 {
-                    if (!profile.IsOriginal && !String.IsNullOrEmpty(profile.ShortcutPath)) ProfileActions.ApplyAvatar(profile, running);
+                    if (!profile.IsOriginal || !String.IsNullOrEmpty(profile.ShortcutPath) || !String.IsNullOrEmpty(profile.AvatarPath) || profile.Name != "Zalo gốc")
+                        ProfileActions.ApplyAvatar(profile, running);
                 }
                 catch (Exception exception) { Store.Log(exception); }
                 finally { foreach (var process in running) process.Dispose(); }
-                string statusKey = profile.StatusText + "\n" + profile.CdpStatus;
-                string previousStatus;
-                changed |= !displayedCdpStatus.TryGetValue(profile, out previousStatus) || previousStatus != statusKey;
-                displayedCdpStatus[profile] = statusKey;
             }
             if (changed) grid.Items.Refresh();
             if (profileCount != null) profileCount.Text = "Tổng cộng " + rows.Count + " hồ sơ";
@@ -988,18 +889,16 @@ namespace ZaloManagerPoc
                 do { id = random.Next(100000, 1000000).ToString(); }
                 while (profiles.Any(p => p.Id == id) || Directory.Exists(Path.Combine(Store.Root, "Instances", id)) || Directory.Exists(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "zm" + id)));
                 var profile = new Profile { Id = id, Name = name.Text.Trim() };
-                status.Text = "Đang sao chép và chuẩn bị hồ sơ. Có thể mất vài phút…";
+                status.Text = "Đang tạo box Sandboxie…";
                 await Task.Run(() =>
                 {
                     var original = Original.Detect();
-                    if (!Instance.SupportsCloneSource(original.DirectoryPath))
-                        throw new InvalidDataException("Zalo gốc " + original.Version +
-                            " có kiểm tra toàn vẹn ASAR. Manager chưa hỗ trợ tạo hồ sơ clone từ bản này.");
                     profile.Source = original.DirectoryPath;
                     Instance.Prepare(profile);
                 });
                 Store.Save(profiles.Concat(new[] { profile }));
                 profiles.Add(profile);
+                name.Clear();
                 status.Text = "Đã chuẩn bị hồ sơ. Bấm Mở Zalo ở hàng hồ sơ để đăng nhập.";
                 RefreshStatus();
                 grid.SelectedItem = profile;
@@ -1036,7 +935,7 @@ namespace ZaloManagerPoc
                 try
                 {
                     if (OriginalWindowsStartup.IsEnabled())
-                        Instance.StartOriginalAtLogon(ResolveShortcutProfile("original"), CdpMessageWatcher.IsRecallEnabled("original"));
+                        Instance.Open(ResolveShortcutProfile("original"));
                 }
                 catch (Exception error)
                 {
@@ -1065,14 +964,9 @@ namespace ZaloManagerPoc
                 }
                 try
                 {
-                    if (owner && profileLaunch)
-                    {
-                        CdpMessageWatcher.IncomingMessageCache.Initialize();
-                        CdpMessageWatcher.ScheduleRecallMediaScan();
-                    }
                     if (profileLaunch)
                     {
-                        Instance.Open(ResolveShortcutProfile(args[1]), owner);
+                        Instance.Open(ResolveShortcutProfile(args[1]));
                         if (!owner) return;
                     }
                     if (args.Length > 0 && args[0] == "--probe")
@@ -1084,7 +978,7 @@ namespace ZaloManagerPoc
                             throw new IOException("Hồ sơ kiểm thử đã tồn tại.");
                         Instance.Prepare(profile);
                         Store.Save(new List<Profile> { profile });
-                        File.WriteAllText(Path.Combine(Store.Root, "probe-result.txt"), "PREPARED\n" + profile.SourceHash + "\n" + profile.PatchedHash);
+                        File.WriteAllText(Path.Combine(Store.Root, "probe-result.txt"), "PREPARED\n" + profile.SourceHash + "\n" + profile.InstalledVersion);
                         return;
                     }
                     var app = new Application { ShutdownMode = ShutdownMode.OnMainWindowClose };
@@ -1098,7 +992,7 @@ namespace ZaloManagerPoc
                         }
                         catch { }
                     };
-                    var window = new ManagerWindow(windowsLogon, profileLaunch);
+                    var window = new ManagerWindow(windowsLogon);
                     if (windowsLogon)
                     {
                         window.ShowActivated = false;
@@ -1125,7 +1019,7 @@ namespace ZaloManagerPoc
             if (id == "original")
             {
                 var original = Original.Detect();
-                return new Profile { Id = id, Name = "Zalo gốc", Source = original.DirectoryPath, InstalledVersion = original.Version };
+                return Store.ApplyOriginal(new Profile { Id = id, Name = "Zalo gốc", Source = original.DirectoryPath, InstalledVersion = original.Version });
             }
             var profile = Store.Load().SingleOrDefault(item => item.Id == id);
             if (profile == null) throw new InvalidOperationException("Không tìm thấy hồ sơ Zalo của shortcut.");

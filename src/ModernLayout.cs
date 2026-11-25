@@ -76,7 +76,7 @@ namespace ZaloManagerPoc
             heading.Children.Add(new Image { Source = logo, Width = 48, Height = 48, Stretch = Stretch.Uniform, Margin = new Thickness(0, 0, 12, 0), VerticalAlignment = VerticalAlignment.Center });
             var titles = new StackPanel();
             titles.Children.Add(new TextBlock { Text = "Quản lý hồ sơ Zalo", FontSize = 22, FontWeight = FontWeights.Bold });
-            titles.Children.Add(new TextBlock { Text = "Mỗi hồ sơ có bản sao chương trình và dữ liệu riêng. Đăng nhập trực tiếp trong cửa sổ Zalo.", FontSize = 12.5, Foreground = ModernBrush("#64748B"), Margin = new Thickness(0, 2, 0, 0), TextWrapping = TextWrapping.Wrap });
+            titles.Children.Add(new TextBlock { Text = "Các hồ sơ dùng chung bản Zalo gốc và có dữ liệu riêng. Đăng nhập trực tiếp trong cửa sổ Zalo.", FontSize = 12.5, Foreground = ModernBrush("#64748B"), Margin = new Thickness(0, 2, 0, 0), TextWrapping = TextWrapping.Wrap });
             Grid.SetColumn(titles, 1); heading.Children.Add(titles);
             managerHeaderActions = CreateManagerHeaderActions();
             Grid.SetColumn(managerHeaderActions, 2); heading.Children.Add(managerHeaderActions);
@@ -170,7 +170,7 @@ namespace ZaloManagerPoc
                 bool compact = grid.ActualWidth < 1150;
                 double[] widths = grid.ActualWidth < 940
                     ? new double[] { 48, 112, 106, 100, 104, 116 }
-                    : compact ? new double[] { 56, 130, 120, 110, 108, 120 } : new double[] { 72, 170, 140, 120, 130, 170 };
+                    : compact ? new double[] { 56, 130, 120, 124, 108, 120 } : new double[] { 72, 170, 140, 132, 130, 170 };
                 for (int index = 0; index < widths.Length; index++)
                     if (grid.Columns[index].Width.Value != widths[index]) grid.Columns[index].Width = new DataGridLength(widths[index]);
             };
@@ -185,6 +185,28 @@ namespace ZaloManagerPoc
                 Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center,
                 Margin = new Thickness(12, 0, 0, 0), IsEnabled = !loadingOnStartup && !busy
             };
+            const string shortcutLabel = "Tạo shortcut";
+            var shortcut = new Button
+            {
+                Content = shortcutLabel, Height = 36, Margin = new Thickness(0, 0, 8, 0),
+                Padding = new Thickness(11, 6, 11, 6), Style = (Style)Resources["RowActionButton"],
+                ToolTip = "Tạo lối tắt mở Zalo Manager trên Desktop"
+            };
+            shortcut.Click += delegate
+            {
+                try
+                {
+                    bool created = ShellIdentity.TryCreateManagerDesktopShortcut(
+                        Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory),
+                        Environment.GetFolderPath(Environment.SpecialFolder.CommonDesktopDirectory));
+                    status.Text = created ? "Đã tạo shortcut Zalo Manager trên Desktop." :
+                        "Desktop đã có shortcut Zalo Manager.";
+                    NoticeDialog.Success(this, created ? "Đã tạo shortcut" : "Đã có shortcut", status.Text);
+                }
+                catch (Exception error) { Report(error); }
+            };
+            actions.Children.Add(shortcut);
+
             const string startupLabel = "Khởi động cùng hệ thống";
             var startup = new ToggleButton
             {
@@ -283,7 +305,7 @@ namespace ZaloManagerPoc
             storage.SetValue(MarginProperty, new Thickness(12, 0, 0, 0)); storage.SetValue(VerticalAlignmentProperty, VerticalAlignment.Center);
             storage.SetValue(TextBlock.ForegroundProperty, ModernBrush("#334155"));
             grid.Columns.Add(new DataGridTemplateColumn { Header = "Data chiếm dụng", Width = 140, CellTemplate = new DataTemplate { VisualTree = storage } });
-            AddBadgeColumn("Trạng thái", "StatusText", "StatusBackground", "StatusForeground", 120, 12);
+            AddStatusColumn(132);
             AddColumn("Phiên bản", "Version", 130);
             var versionStyle = new Style(typeof(TextBlock)); versionStyle.Setters.Add(new Setter(MarginProperty, new Thickness(12, 0, 0, 0))); versionStyle.Setters.Add(new Setter(VerticalAlignmentProperty, VerticalAlignment.Center)); versionStyle.Setters.Add(new Setter(TextBlock.FontFamilyProperty, new FontFamily("Consolas"))); versionStyle.Setters.Add(new Setter(TextBlock.FontSizeProperty, 12.0)); versionStyle.Setters.Add(new Setter(TextBlock.ForegroundProperty, ModernBrush("#334155"))); ((DataGridTextColumn)grid.Columns[4]).ElementStyle = versionStyle;
             AddBadgeColumn("Cập nhật", "UpdateStatus", "UpdateBackground", "UpdateForeground", 170, 6);
@@ -350,10 +372,41 @@ namespace ZaloManagerPoc
             return new DataTemplate { VisualTree = button };
         }
 
+        private void AddStatusColumn(double width)
+        {
+            var stack = new FrameworkElementFactory(typeof(StackPanel));
+            stack.SetValue(MarginProperty, new Thickness(12, 0, 6, 0));
+            stack.SetValue(VerticalAlignmentProperty, VerticalAlignment.Center);
+            stack.AppendChild(StatusBadge("LoginStatusText", "LoginStatusBackground", "LoginStatusForeground", width - 24));
+            var run = StatusBadge("StatusText", "StatusBackground", "StatusForeground", width - 24);
+            run.SetValue(MarginProperty, new Thickness(0, 4, 0, 0));
+            stack.AppendChild(run);
+            grid.Columns.Add(new DataGridTemplateColumn { Header = "Trạng thái", Width = width, CellTemplate = new DataTemplate { VisualTree = stack } });
+        }
+
+        private static FrameworkElementFactory StatusBadge(string text, string background, string foreground, double maxWidth)
+        {
+            var border = new FrameworkElementFactory(typeof(Border));
+            border.SetBinding(Border.BackgroundProperty, new Binding(background));
+            border.SetValue(Border.CornerRadiusProperty, new CornerRadius(10));
+            border.SetValue(Border.PaddingProperty, new Thickness(8, 2, 8, 2));
+            border.SetValue(HorizontalAlignmentProperty, HorizontalAlignment.Left);
+            var content = new FrameworkElementFactory(typeof(TextBlock));
+            content.SetBinding(TextBlock.TextProperty, new Binding(text));
+            content.SetBinding(TextBlock.ForegroundProperty, new Binding(foreground));
+            content.SetBinding(ToolTipProperty, new Binding(text));
+            content.SetValue(TextBlock.FontSizeProperty, 11.0);
+            content.SetValue(TextBlock.FontWeightProperty, FontWeights.SemiBold);
+            content.SetValue(TextBlock.TextTrimmingProperty, TextTrimming.CharacterEllipsis);
+            content.SetValue(MaxWidthProperty, maxWidth);
+            border.AppendChild(content);
+            return border;
+        }
+
         private void AddBadgeColumn(string header, string text, string background, string foreground, double width, double radius)
         {
             var border = new FrameworkElementFactory(typeof(Border)); border.SetBinding(Border.BackgroundProperty, new Binding(background)); border.SetValue(Border.CornerRadiusProperty, new CornerRadius(radius)); border.SetValue(Border.PaddingProperty, new Thickness(8, 4, 8, 4)); border.SetValue(MarginProperty, new Thickness(12, 0, 6, 0)); border.SetValue(HorizontalAlignmentProperty, HorizontalAlignment.Left); border.SetValue(VerticalAlignmentProperty, VerticalAlignment.Center);
-            var content = new FrameworkElementFactory(typeof(TextBlock)); content.SetBinding(TextBlock.TextProperty, new Binding(text)); content.SetBinding(TextBlock.ForegroundProperty, new Binding(foreground)); content.SetBinding(ToolTipProperty, new Binding(text == "StatusText" ? "CdpStatus" : text)); content.SetValue(TextBlock.FontSizeProperty, 11.5); content.SetValue(TextBlock.FontWeightProperty, FontWeights.SemiBold); content.SetValue(TextBlock.TextTrimmingProperty, TextTrimming.CharacterEllipsis); content.SetValue(MaxWidthProperty, width - 40); border.AppendChild(content);
+            var content = new FrameworkElementFactory(typeof(TextBlock)); content.SetBinding(TextBlock.TextProperty, new Binding(text)); content.SetBinding(TextBlock.ForegroundProperty, new Binding(foreground)); content.SetBinding(ToolTipProperty, new Binding(text)); content.SetValue(TextBlock.FontSizeProperty, 11.5); content.SetValue(TextBlock.FontWeightProperty, FontWeights.SemiBold); content.SetValue(TextBlock.TextTrimmingProperty, TextTrimming.CharacterEllipsis); content.SetValue(MaxWidthProperty, width - 40); border.AppendChild(content);
             grid.Columns.Add(new DataGridTemplateColumn { Header = header, Width = width, CellTemplate = new DataTemplate { VisualTree = border } });
         }
     }

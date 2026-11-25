@@ -58,27 +58,10 @@ namespace ZaloManagerPoc
 
         private static void MeasureApp(Profile profile, StorageMeasurement result, HashSet<string> seen)
         {
-            string originalRoot = profile.Source;
-            if (profile.IsOriginal && !String.IsNullOrEmpty(originalRoot) && Path.GetFileName(originalRoot).StartsWith("Zalo-", StringComparison.OrdinalIgnoreCase))
-                originalRoot = Path.GetDirectoryName(originalRoot);
-            result.AppBytes = Count(profile.IsOriginal ? originalRoot : profile.DirectoryPath, result, seen);
-            if (!profile.IsOriginal)
-            {
-                result.AppBytes += Count(Path.Combine(Store.Root, "Instances", profile.Id), result, seen);
-                result.AppBytes += Count(Path.Combine(Store.Root, "Releases", profile.Id), result, seen);
-            }
-        }
-
-        private static readonly string[] RecallEntries = { "incoming-cache.dat", "incoming-cache.dat.tmp", "incoming-cache.dat.v1.bak",
-            "recalled-messages.dat", "recalled-messages.dat.tmp", "media", "media-staging" };
-
-        internal static StorageMeasurement MeasureRecallStore()
-        {
-            var result = new StorageMeasurement();
-            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            foreach (var entry in RecallEntries)
-                result.DataBytes += Count(Path.Combine(Store.Root, entry), result, seen);
-            return result;
+            if (profile.IsOriginal) return;
+            result.AppBytes = Count(profile.UsesSandboxie ? SandboxieClone.BoxRoot(profile) : profile.DirectoryPath, result, seen);
+            result.AppBytes += Count(Path.Combine(Store.Root, "Instances", profile.Id), result, seen);
+            result.AppBytes += Count(Path.Combine(Store.Root, "Releases", profile.Id), result, seen);
         }
 
         internal static long GetFileStorageBytes(string path, StorageMeasurement result)
@@ -101,9 +84,9 @@ namespace ZaloManagerPoc
                 catch (FileNotFoundException) { return 0; }
                 catch (DirectoryNotFoundException) { return 0; }
                 if ((attributes & FileAttributes.ReparsePoint) != 0) { result.Incomplete = true; return 0; }
-                seen.Add(path);
                 if ((attributes & FileAttributes.Directory) == 0)
                     return GetFileStorageBytes(path, result);
+                if (!seen.Add(path)) return 0;
                 long total = 0;
                 foreach (var child in Directory.EnumerateFileSystemEntries(path)) total += Count(child, result, seen);
                 return total;
@@ -119,11 +102,7 @@ namespace ZaloManagerPoc
         private bool profileStorageScanning;
         private bool profileStorageRefreshRequested;
         private DateTime nextProfileStorageCheck;
-        private bool recallStorageScanning;
-        private bool recallStorageRefreshRequested;
-        private DateTime nextRecallStorageCheck;
         private bool storageClosed;
-        private StorageMeasurement recallStoreUsage;
 
         private void CloseStorageMonitoring()
         {
@@ -134,59 +113,17 @@ namespace ZaloManagerPoc
         {
             if (profileStorageTotal == null) return;
             var measured = rows.Where(profile => profile.MeasuredStorage != null).Select(profile => profile.MeasuredStorage).ToArray();
-            bool pending = measured.Length < rows.Count || recallStoreUsage == null;
-            long recallBytes = recallStoreUsage == null ? 0 : recallStoreUsage.TotalBytes;
+            bool pending = measured.Length < rows.Count;
             string total = pending && measured.Length == 0 ? "Đang tính…"
-                : ((pending || measured.Any(usage => usage.Incomplete) || (recallStoreUsage != null && recallStoreUsage.Incomplete)) ? "≥ " : "")
-                    + StorageMeasurement.Format(measured.Sum(usage => usage.TotalBytes) + recallBytes);
+                : ((pending || measured.Any(usage => usage.Incomplete)) ? "≥ " : "")
+                    + StorageMeasurement.Format(measured.Sum(usage => usage.TotalBytes));
             profileStorageTotal.Text = "Tổng: " + total;
-            profileStorageTotal.ToolTip = "Kho thu hồi dùng chung: " +
-                (recallStoreUsage == null ? "Đang tính…" : recallStoreUsage.Text) +
-                "\nGồm cache, kho thu hồi, media và tệp tạm trên đĩa." +
-                "\nĐo khoảng 2 phút/lần và ngay sau khi xóa tin thu hồi.";
-        }
-
-        private async void RefreshRecallStore()
-        {
-            if (storageClosed || recallStorageScanning ||
-                (!recallStorageRefreshRequested && DateTime.UtcNow < nextRecallStorageCheck)) return;
-            recallStorageRefreshRequested = false;
-            recallStorageScanning = true;
-            StorageMeasurement measurement = null;
-            try
-            {
-                measurement = await Task.Run(() => StorageUsage.MeasureRecallStore()).ConfigureAwait(false);
-            }
-            catch (Exception exception) { Store.Log(exception); }
-            try
-            {
-                await Dispatcher.InvokeAsync(new Action(delegate
-                {
-                    recallStorageScanning = false;
-                    if (storageClosed) return;
-                    if (recallStorageRefreshRequested) { RefreshRecallStore(); return; }
-                    nextRecallStorageCheck = DateTime.UtcNow + StorageCheckInterval;
-                    if (measurement != null)
-                    {
-                        recallStoreUsage = measurement;
-                        RefreshProfileStorageTotal();
-                    }
-                })).Task.ConfigureAwait(false);
-            }
-            catch (TaskCanceledException) { }
-        }
-
-        private void RefreshRecallStorageAfterDeletion()
-        {
-            recallStorageRefreshRequested = true;
-            RefreshRecallStore();
         }
 
         private void RefreshStorageUsage()
         {
             if (storageClosed) return;
             RefreshProfileStorageTotal();
-            RefreshRecallStore();
             RefreshProfileStorage();
         }
 

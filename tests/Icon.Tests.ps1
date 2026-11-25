@@ -30,7 +30,7 @@ try {
     try {
         if($reader.ReadUInt16() -ne 0 -or $reader.ReadUInt16() -ne 1 -or $reader.ReadUInt16() -ne 6){throw 'Missing icon sizes'}
     } finally {$reader.Dispose()}
-    'PASS six-size PNG-backed ICO preserves avatar colors through Windows icon decoding'
+    'PASS six-size ICO uses compatible 64px frames and preserves avatar colors'
 } finally {
     $root=[IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\')+'\'
     if(-not [IO.Path]::GetFullPath($temp).StartsWith($root,[StringComparison]::OrdinalIgnoreCase) -or -not ([IO.Path]::GetFileName($temp)).StartsWith('ZaloIconTest-')){throw 'Unsafe test cleanup'}

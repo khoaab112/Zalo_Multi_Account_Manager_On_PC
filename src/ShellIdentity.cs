@@ -1,4 +1,5 @@
 using System;
+using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
 
@@ -57,6 +58,58 @@ namespace ZaloManagerPoc
             }
             finally { Marshal.ReleaseComObject(link); }
         }
+
+        internal static bool TryCreateManagerDesktopShortcut(string desktop, string commonDesktop)
+        {
+            if (String.IsNullOrEmpty(desktop))
+                throw new IOException("Không tìm được thư mục Desktop của bạn.");
+
+            string launcher = typeof(Program).Assembly.Location;
+            string installed = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
+                "Zalo Manager", "ZaloManager.exe");
+            foreach (string directory in new[] { desktop, commonDesktop })
+            {
+                if (!Directory.Exists(directory)) continue;
+                foreach (string path in Directory.EnumerateFiles(directory, "*.lnk"))
+                    if (LinksToManager(path, launcher, installed)) return false;
+            }
+
+            string destination = Path.Combine(desktop, "Zalo Manager.lnk");
+            if (File.Exists(destination))
+                throw new IOException("Desktop đã có một shortcut tên Zalo Manager trỏ tới vị trí khác.");
+
+            Directory.CreateDirectory(desktop);
+            string temporary = Path.Combine(desktop, Guid.NewGuid().ToString("N") + ".lnk");
+            try
+            {
+                SaveManagerShortcut(temporary, "", "Mở Zalo Manager", null);
+                File.Move(temporary, destination);
+            }
+            finally { if (File.Exists(temporary)) File.Delete(temporary); }
+            NotifyShortcut(destination);
+            return true;
+        }
+
+        private static bool LinksToManager(string path, string launcher, string installed)
+        {
+            var link = (IShellLinkW)new ShellLink();
+            try
+            {
+                ((System.Runtime.InteropServices.ComTypes.IPersistFile)link).Load(path, 0);
+                var target = new StringBuilder(32768);
+                var arguments = new StringBuilder(1024);
+                link.GetPath(target, target.Capacity, IntPtr.Zero, 0);
+                link.GetArguments(arguments, arguments.Capacity);
+                string executable = target.ToString();
+                return arguments.Length == 0 &&
+                    (String.Equals(executable, launcher, StringComparison.OrdinalIgnoreCase) ||
+                     String.Equals(executable, installed, StringComparison.OrdinalIgnoreCase)) &&
+                    File.Exists(executable);
+            }
+            catch (COMException) { return false; }
+            finally { Marshal.ReleaseComObject(link); }
+        }
+
         private static string ProfileLaunchArguments(Profile profile)
         {
             return "--open-profile " + profile.Id;

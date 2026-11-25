@@ -73,7 +73,7 @@ namespace ZaloManagerPoc
             profile.ShortcutPath = path;
             if (!String.IsNullOrEmpty(previous) && !String.Equals(previous, path, StringComparison.OrdinalIgnoreCase) && File.Exists(previous))
                 File.Delete(previous);
-            if (destinationDirectory == null) RefreshShellShortcuts(profile);
+            if (destinationDirectory == null) RefreshShellShortcuts(profile, true);
             ShellIdentity.NotifyShortcut(path);
         }
 
@@ -82,12 +82,16 @@ namespace ZaloManagerPoc
             ShellIdentity.SaveShortcut(path, profile, MakeIcon(profile));
         }
 
-        private static void RefreshShellShortcuts(Profile profile)
+        internal static void RefreshShellShortcuts(Profile profile, bool createStartMenuShortcut)
         {
             string programs = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Programs), "Zalo Manager");
-            Directory.CreateDirectory(programs);
-            // Update the stable per-profile Start Menu link used by Windows taskbar grouping.
-            SaveShortcut(Path.Combine(programs, "Zalo-" + profile.Id + ".lnk"), profile);
+            string startMenuShortcut = Path.Combine(programs, "Zalo-" + profile.Id + ".lnk");
+            if (createStartMenuShortcut || File.Exists(startMenuShortcut))
+            {
+                Directory.CreateDirectory(programs);
+                SaveShortcut(startMenuShortcut, profile);
+                ShellIdentity.NotifyShortcut(startMenuShortcut);
+            }
             string pinned = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), @"Microsoft\Internet Explorer\Quick Launch\User Pinned\TaskBar");
             if (!Directory.Exists(pinned)) return;
             foreach (string link in Directory.GetFiles(pinned, "*.lnk"))
@@ -100,7 +104,7 @@ namespace ZaloManagerPoc
         public static string MakeIcon(Profile profile)
         {
             if (String.IsNullOrEmpty(profile.AvatarPath)) return profile.Executable;
-            string iconPath = Path.Combine(Path.GetDirectoryName(profile.AvatarPath), Path.GetFileNameWithoutExtension(profile.AvatarPath) + ".shell-v2.ico");
+            string iconPath = Path.Combine(Path.GetDirectoryName(profile.AvatarPath), Path.GetFileNameWithoutExtension(profile.AvatarPath) + ".shell-v3.ico");
             if (File.Exists(iconPath)) return iconPath;
             int[] sizes = { 16, 24, 32, 48, 64, 256 };
             var frames = new List<byte[]>();
@@ -116,7 +120,9 @@ namespace ZaloManagerPoc
                         graphics.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
                         graphics.DrawImage(source, 0, 0, size, size);
                     }
-                    bitmap.Save(memory, System.Drawing.Imaging.ImageFormat.Png); frames.Add(memory.ToArray());
+                    if (size == 256) bitmap.Save(memory, System.Drawing.Imaging.ImageFormat.Png);
+                    else WriteDibIconFrame(bitmap, memory);
+                    frames.Add(memory.ToArray());
                 }
             }
             string temporary = iconPath + ".tmp";
@@ -135,8 +141,33 @@ namespace ZaloManagerPoc
             File.Move(temporary, iconPath);
             return iconPath;
         }
+
+        private static void WriteDibIconFrame(System.Drawing.Bitmap bitmap, Stream output)
+        {
+            int size = bitmap.Width;
+            int maskStride = (size + 31) / 32 * 4;
+            var mask = new byte[maskStride * size];
+            using (var writer = new BinaryWriter(output, System.Text.Encoding.UTF8, true))
+            {
+                writer.Write(40);
+                writer.Write(size);
+                writer.Write(size * 2);
+                writer.Write((ushort)1);
+                writer.Write((ushort)32);
+                for (int i = 0; i < 6; i++) writer.Write(0);
+                for (int row = 0; row < size; row++)
+                for (int column = 0; column < size; column++)
+                {
+                    var pixel = bitmap.GetPixel(column, size - row - 1);
+                    writer.Write(pixel.ToArgb());
+                    if (pixel.A == 0) mask[row * maskStride + column / 8] |= (byte)(0x80 >> (column % 8));
+                }
+                writer.Write(mask);
+            }
+        }
         [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern IntPtr SendMessageTimeout(IntPtr window, uint message, IntPtr type, IntPtr icon, uint flags, uint timeout, out IntPtr result);
         [DllImport("user32.dll", CharSet = CharSet.Unicode, EntryPoint = "SendMessageTimeoutW")] private static extern IntPtr SendTextTimeout(IntPtr window, uint message, IntPtr type, string text, uint flags, uint timeout, out IntPtr result);
+        [DllImport("user32.dll")] private static extern bool IsWindow(IntPtr window);
         private static readonly Dictionary<string, System.Drawing.Icon> Icons = new Dictionary<string, System.Drawing.Icon>();
         private static readonly Dictionary<IntPtr, string> AppliedIcons = new Dictionary<IntPtr, string>();
         public static void ApplyAvatar(Profile profile)
@@ -150,24 +181,63 @@ namespace ZaloManagerPoc
         {
             if (processes.Count == 0) return;
             System.Drawing.Icon icon = null;
-            string iconKey = profile.Id + "|" + profile.AvatarPath + "|shell-v2";
-            string key = iconKey + "|" + profile.Name;
+            var windows = WindowActivation.Find(processes.Where(process => process.ProcessName == "Zalo").Select(process => process.Id))
+                .Where(WindowActivation.IsWindowVisible).ToArray();
+            if (windows.Length == 0) return;
+            string title = String.IsNullOrWhiteSpace(profile.Name) ? "Zalo" : "Zalo - " + profile.Name;
+            string iconKey = profile.Id + "|" + profile.AvatarPath + "|shell-v3";
+            string iconPath = MakeIcon(profile);
             if (!String.IsNullOrEmpty(profile.AvatarPath) && !Icons.TryGetValue(iconKey, out icon))
-            { icon = new System.Drawing.Icon(MakeIcon(profile)); Icons.Add(iconKey, icon); }
-            var windows = WindowActivation.Find(processes.Where(process => process.ProcessName == "Zalo").Select(process => process.Id));
+            {
+                string prefix = profile.Id + "|";
+                foreach (string oldKey in Icons.Keys.Where(k => k.StartsWith(prefix, StringComparison.Ordinal)).ToList())
+                {
+                    Icons[oldKey].Dispose();
+                    Icons.Remove(oldKey);
+                }
+                icon = new System.Drawing.Icon(iconPath, 32, 32);
+                Icons.Add(iconKey, icon);
+            }
+            foreach (IntPtr dead in AppliedIcons.Keys.Where(h => !IsWindow(h)).ToList())
+                AppliedIcons.Remove(dead);
             foreach (var window in windows)
             {
+                IntPtr result;
+                if (!String.Equals(WindowActivation.Title(window), title, StringComparison.Ordinal))
+                    SendTextTimeout(window, 0x000C, IntPtr.Zero, title, 2, 200, out result);
+                string key = WindowActivation.OwnerProcessId(window) + "|" + iconKey + "|" + title;
                 string applied;
                 if (AppliedIcons.TryGetValue(window, out applied) && applied == key) continue;
-                ShellIdentity.Window(window, profile, MakeIcon(profile));
-                IntPtr result;
-                if (icon != null)
-                {
-                    SendMessageTimeout(window, 0x80, IntPtr.Zero, icon.Handle, 2, 200, out result);
-                    SendMessageTimeout(window, 0x80, new IntPtr(1), icon.Handle, 2, 200, out result);
-                }
+                if (icon != null &&
+                    (SendMessageTimeout(window, 0x80, IntPtr.Zero, icon.Handle, 2, 200, out result) == IntPtr.Zero ||
+                     SendMessageTimeout(window, 0x80, new IntPtr(1), icon.Handle, 2, 200, out result) == IntPtr.Zero))
+                    continue;
+                ShellIdentity.Window(window, profile, iconPath);
                 AppliedIcons[window] = key;
             }
+        }
+
+        private static void CleanupDirectory(string path)
+        {
+            if (String.IsNullOrEmpty(path) || !Directory.Exists(path)) return;
+            try { Directory.Delete(path, true); }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+        }
+
+        internal static void DeleteAvatarFiles(string avatarPath)
+        {
+            if (String.IsNullOrEmpty(avatarPath)) return;
+            try { if (File.Exists(avatarPath)) File.Delete(avatarPath); }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+            try
+            {
+                string iconPath = Path.Combine(Path.GetDirectoryName(avatarPath), Path.GetFileNameWithoutExtension(avatarPath) + ".shell-v2.ico");
+                if (File.Exists(iconPath)) File.Delete(iconPath);
+            }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
         }
 
         public static void Export(Profile profile, string destination)
@@ -176,28 +246,31 @@ namespace ZaloManagerPoc
             if (!Directory.Exists(profile.DataPath)) throw new DirectoryNotFoundException("Hồ sơ chưa có dữ liệu để xuất.");
             string staging = Path.Combine(Store.Root, "Transfers", Guid.NewGuid().ToString("N"));
             string payload = Path.Combine(staging, "data");
-            Instance.CopyDirectory(profile.DataPath, payload);
-            RequireStopped(profile);
-            var identity = IdentityReader.ReadDirectory(payload);
-            var manifest = new DataArchive { Format = 2, ProfileId = profile.Id, Version = profile.Version,
-                AccountId = identity.AccountId, AccountName = identity.Name, CreatedUtc = DateTime.UtcNow.ToString("o"),
-                Scope = "CloneDataDirectoryOnly; external downloads, cloud-only media and operating-system credentials are not included; login and history restoration not verified",
-                Files = new Dictionary<string, string>() };
-            foreach (string file in Directory.GetFiles(payload, "*", SearchOption.AllDirectories))
-                manifest.Files.Add(file.Substring(payload.Length + 1).Replace('\\', '/'), Instance.Hash(file));
-            using (var file = File.Create(Path.Combine(staging, "manifest.json")))
-                new DataContractJsonSerializer(typeof(DataArchive)).WriteObject(file, manifest);
-            string temporary = destination + "." + Guid.NewGuid().ToString("N") + ".tmp";
-            // Framework ZipFile emits backslashes for nested paths on Windows.
-            // Write portable names explicitly so real nested Zalo data can round-trip.
-            using (var zip = ZipFile.Open(temporary, ZipArchiveMode.Create))
-            foreach (string file in Directory.GetFiles(staging, "*", SearchOption.AllDirectories))
-                zip.CreateEntryFromFile(file, file.Substring(staging.Length + 1).Replace('\\', '/'), CompressionLevel.Optimal);
-            // Opening the archive verifies the output before publishing it.
-            ValidateArchive(temporary, profile);
-            if (File.Exists(destination)) File.Replace(temporary, destination, null);
-            else File.Move(temporary, destination);
-            // Transfer staging is retained until explicitly cleaned up by the user.
+            try
+            {
+                Instance.CopyDirectory(profile.DataPath, payload);
+                RequireStopped(profile);
+                var identity = IdentityReader.ReadDirectory(payload);
+                var manifest = new DataArchive { Format = 2, ProfileId = profile.Id, Version = profile.Version,
+                    AccountId = identity.AccountId, AccountName = identity.Name, CreatedUtc = DateTime.UtcNow.ToString("o"),
+                    Scope = "CloneDataDirectoryOnly; external downloads, cloud-only media and operating-system credentials are not included; login and history restoration not verified",
+                    Files = new Dictionary<string, string>() };
+                foreach (string file in Directory.GetFiles(payload, "*", SearchOption.AllDirectories))
+                    manifest.Files.Add(file.Substring(payload.Length + 1).Replace('\\', '/'), Instance.Hash(file));
+                using (var file = File.Create(Path.Combine(staging, "manifest.json")))
+                    new DataContractJsonSerializer(typeof(DataArchive)).WriteObject(file, manifest);
+                string temporary = destination + "." + Guid.NewGuid().ToString("N") + ".tmp";
+                // Framework ZipFile emits backslashes for nested paths on Windows.
+                // Write portable names explicitly so real nested Zalo data can round-trip.
+                using (var zip = ZipFile.Open(temporary, ZipArchiveMode.Create))
+                foreach (string file in Directory.GetFiles(staging, "*", SearchOption.AllDirectories))
+                    zip.CreateEntryFromFile(file, file.Substring(staging.Length + 1).Replace('\\', '/'), CompressionLevel.Optimal);
+                // Opening the archive verifies the output before publishing it.
+                ValidateArchive(temporary, profile);
+                if (File.Exists(destination)) File.Replace(temporary, destination, null);
+                else File.Move(temporary, destination);
+            }
+            finally { CleanupDirectory(staging); }
         }
 
         public static void ValidateArchive(string archive, Profile profile)
@@ -246,32 +319,36 @@ namespace ZaloManagerPoc
         {
             RequireStopped(profile);
             string staging = profile.DataPath + ".import-" + Guid.NewGuid().ToString("N");
-            using (var zip = ZipFile.OpenRead(archive))
+            try
             {
-                var manifest = ReadManifest(zip, profile);
-                long total = 0;
-                foreach (var entry in zip.Entries) total = checked(total + entry.Length);
-                if (new DriveInfo(Path.GetPathRoot(staging)).AvailableFreeSpace < total + 64L * 1024 * 1024)
-                    throw new IOException("Ổ đĩa thiếu dung lượng để import.");
-                Directory.CreateDirectory(staging);
-                foreach (var entry in zip.Entries.Where(item => item.FullName.StartsWith("data/", StringComparison.Ordinal)))
+                using (var zip = ZipFile.OpenRead(archive))
                 {
-                    string target = Path.GetFullPath(Path.Combine(staging, entry.FullName.Substring(5).Replace('/', '\\')));
-                    if (!target.StartsWith(Path.GetFullPath(staging) + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)) throw new InvalidDataException("Đường dẫn import vượt thư mục hồ sơ.");
-                    Directory.CreateDirectory(Path.GetDirectoryName(target));
-                    using (var input = entry.Open()) using (var output = File.Create(target)) input.CopyTo(output);
+                    var manifest = ReadManifest(zip, profile);
+                    long total = 0;
+                    foreach (var entry in zip.Entries) total = checked(total + entry.Length);
+                    if (new DriveInfo(Path.GetPathRoot(staging)).AvailableFreeSpace < total + 64L * 1024 * 1024)
+                        throw new IOException("Ổ đĩa thiếu dung lượng để import.");
+                    Directory.CreateDirectory(staging);
+                    foreach (var entry in zip.Entries.Where(item => item.FullName.StartsWith("data/", StringComparison.Ordinal)))
+                    {
+                        string target = Path.GetFullPath(Path.Combine(staging, entry.FullName.Substring(5).Replace('/', '\\')));
+                        if (!target.StartsWith(Path.GetFullPath(staging) + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)) throw new InvalidDataException("Đường dẫn import vượt thư mục hồ sơ.");
+                        Directory.CreateDirectory(Path.GetDirectoryName(target));
+                        using (var input = entry.Open()) using (var output = File.Create(target)) input.CopyTo(output);
+                    }
+                    // Independently read the extracted database, not just the editable manifest.
+                    if (IdentityReader.ReadDirectory(staging).AccountId != manifest.AccountId)
+                        throw new InvalidDataException("ID Zalo trong dữ liệu không khớp bản khai. Dữ liệu hiện tại được giữ nguyên.");
+                    CheckAccount(profile, manifest.AccountId);
                 }
-                // Independently read the extracted database, not just the editable manifest.
-                if (IdentityReader.ReadDirectory(staging).AccountId != manifest.AccountId)
-                    throw new InvalidDataException("ID Zalo trong dữ liệu không khớp bản khai. Dữ liệu hiện tại được giữ nguyên.");
-                CheckAccount(profile, manifest.AccountId);
+                RequireStopped(profile);
+                string backup = profile.DataPath + ".before-import-" + Guid.NewGuid().ToString("N");
+                bool moved = Directory.Exists(profile.DataPath);
+                if (moved) Directory.Move(profile.DataPath, backup);
+                try { Directory.Move(staging, profile.DataPath); }
+                catch { if (moved) Directory.Move(backup, profile.DataPath); throw; }
             }
-            RequireStopped(profile);
-            string backup = profile.DataPath + ".before-import-" + Guid.NewGuid().ToString("N");
-            bool moved = Directory.Exists(profile.DataPath);
-            if (moved) Directory.Move(profile.DataPath, backup);
-            try { Directory.Move(staging, profile.DataPath); }
-            catch { if (moved) Directory.Move(backup, profile.DataPath); throw; }
+            finally { CleanupDirectory(staging); }
         }
 
         public static string ArchiveDeleted(Profile profile)
@@ -279,9 +356,14 @@ namespace ZaloManagerPoc
             RequireStopped(profile);
             string deleted = Path.Combine(Store.Root, "Deleted", profile.Id + "-" + Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(deleted);
-            // Move only the known data directory. Program generations stay available for recovery.
-            if (Directory.Exists(profile.DataPath)) Directory.Move(profile.DataPath, Path.Combine(deleted, "data"));
+            string data = ArchiveSource(profile);
+            if (Directory.Exists(data)) Directory.Move(data, Path.Combine(deleted, "data"));
             return deleted;
+        }
+
+        internal static string ArchiveSource(Profile profile)
+        {
+            return profile.UsesSandboxie ? SandboxieClone.BoxRoot(profile) : profile.DataPath;
         }
     }
 
@@ -297,36 +379,6 @@ namespace ZaloManagerPoc
             panel.AppendChild(power);
 
             panel.AppendChild(RowButton("Data", "Mở thư mục Data", "RowActionButton"));
-
-            var recallButton = RowButton("Thu hồi", "Xem tin đã thu hồi của hồ sơ này", "RowActionButton", ShowRecalledMessages);
-            recallButton.SetValue(Button.MarginProperty, new Thickness(0));
-
-            var badge = new FrameworkElementFactory(typeof(Border));
-            badge.SetValue(Border.BackgroundProperty, ModernBrush("#DC2626"));
-            badge.SetValue(Border.CornerRadiusProperty, new CornerRadius(9));
-            badge.SetValue(Border.MinWidthProperty, 18.0);
-            badge.SetValue(Border.PaddingProperty, new Thickness(4, 1, 4, 1));
-            badge.SetValue(Border.MarginProperty, new Thickness(0, -7, -7, 0));
-            badge.SetValue(Border.HorizontalAlignmentProperty, HorizontalAlignment.Right);
-            badge.SetValue(Border.VerticalAlignmentProperty, VerticalAlignment.Top);
-            badge.SetValue(Border.BorderBrushProperty, System.Windows.Media.Brushes.White);
-            badge.SetValue(Border.BorderThicknessProperty, new Thickness(1));
-            badge.SetValue(Border.IsHitTestVisibleProperty, false);
-            badge.SetBinding(Border.VisibilityProperty, new Binding("RecalledBadgeVisibility"));
-
-            var count = new FrameworkElementFactory(typeof(TextBlock));
-            count.SetValue(TextBlock.ForegroundProperty, System.Windows.Media.Brushes.White);
-            count.SetValue(TextBlock.FontWeightProperty, FontWeights.SemiBold);
-            count.SetValue(TextBlock.FontSizeProperty, 11.0);
-            count.SetValue(TextBlock.TextAlignmentProperty, TextAlignment.Center);
-            count.SetBinding(TextBlock.TextProperty, new Binding("RecalledCount"));
-            badge.AppendChild(count);
-            var recallAction = new FrameworkElementFactory(typeof(Grid));
-            recallAction.SetValue(FrameworkElement.VerticalAlignmentProperty, VerticalAlignment.Center);
-            recallAction.AppendChild(recallButton);
-            recallAction.AppendChild(badge);
-            recallAction.SetValue(FrameworkElement.MarginProperty, new Thickness(0, 0, 12, 0));
-            panel.AppendChild(recallAction);
 
             var more = RowButton("\uE712", "…", "RowActionButton");
             more.SetValue(Button.ToolTipProperty, "Thao tác khác · Tạo shortcut");
@@ -369,25 +421,11 @@ namespace ZaloManagerPoc
             if (profile == null || busy) return;
             string action = (string)control.Tag;
             if (action == "…") { ShowProfileMenu((Button)control, profile); return; }
-            if (action == "Xem tin đã thu hồi của hồ sơ này" || action == "Thu hồi")
-            {
-                OpenRecallWindow(profile);
-                return;
-            }
             SetBusy(true);
             try
             {
                 if (action == "Mở Zalo")
                 {
-                    if (!profile.IsOriginal && profile.PatchRevision < 4 && !Instance.IsRunning(profile))
-                    {
-                        status.Text = "Đang nâng bản chương trình clone, giữ nguyên thư mục dữ liệu phiên cũ…";
-                        var original = await Task.Run(() => Original.Detect());
-                        var next = await Task.Run(() => Instance.PrepareUpdate(profile, original));
-                        Store.Save(profiles.Select(item => item == profile ? next : item));
-                        profiles[profiles.IndexOf(profile)] = next; profile = next;
-                        if (!String.IsNullOrEmpty(profile.ShortcutPath)) ProfileActions.CreateShortcut(profile);
-                    }
                     bool shown = await Task.Run(() => Instance.OpenAndCheckWindow(profile));
                     if (shown)
                     {
@@ -407,7 +445,7 @@ namespace ZaloManagerPoc
                 else if (action == "Tạo Shortcut")
                 {
                     ProfileActions.CreateShortcut(profile);
-                    Store.Save(profiles);
+                    SaveProfileChanges(profile);
                     NoticeDialog.Success(this, "Tạo shortcut thành công", "Lối tắt của hồ sơ đã được tạo.",
                         Path.GetFileName(profile.ShortcutPath), Path.GetDirectoryName(profile.ShortcutPath), profile.ShortcutPath);
                 }
@@ -417,11 +455,11 @@ namespace ZaloManagerPoc
                     if (!ConfirmDialog.Ask(this, "Xóa hồ sơ Zalo", "Xóa hồ sơ ", profile.Name, "Dữ liệu được chuyển vào thư mục Deleted để có thể lấy lại.", "Xóa hồ sơ")) return;
                     string location = await Task.Run(() => ProfileActions.ArchiveDeleted(profile));
                     try { Store.Save(profiles.Where(item => item != profile)); }
-                    catch { if (Directory.Exists(Path.Combine(location, "data"))) Directory.Move(Path.Combine(location, "data"), profile.DataPath); throw; }
+                    catch { if (Directory.Exists(Path.Combine(location, "data"))) Directory.Move(Path.Combine(location, "data"), ProfileActions.ArchiveSource(profile)); throw; }
                     profiles.Remove(profile); status.Text = "Đã xóa hồ sơ. Dữ liệu giữ tại " + location;
                     if (!String.IsNullOrEmpty(profile.ShortcutPath) && File.Exists(profile.ShortcutPath)) File.Delete(profile.ShortcutPath);
                     RefreshStatus();
-                    NoticeDialog.Success(this, "Đã xóa hồ sơ", "Dữ liệu đã được chuyển vào thư mục lưu hồ sơ đã xóa.", profile.Name, location, location);
+                    NoticeDialog.Success(this, "Đã xóa hồ sơ", "Dữ liệu đã được chuyển vào thư mục lưu hồ sơ đã xóa.");
                 }
             }
             catch (Exception exception) { Report(exception); }
@@ -438,43 +476,27 @@ namespace ZaloManagerPoc
 
         private ContextMenu CreateProfileMenu(Profile profile)
         {
+            bool loggedIn = profile.IsLoggedIn;
             var menu = new ContextMenu();
             menu.Style = (Style)Resources["ModernContextMenu"];
             menu.Resources.MergedDictionaries.Add(Resources);
-            var shortcut = new MenuItem { Header = "Tạo shortcut", Tag = "Tạo Shortcut", DataContext = profile, Icon = MenuGlyph("\uE71B") };
+            var shortcut = new MenuItem { Header = "Tạo shortcut", Tag = "Tạo Shortcut", DataContext = profile, Icon = MenuGlyph("\uE71B"), IsEnabled = loggedIn };
             shortcut.Click += RowAction;
             menu.Items.Add(shortcut);
-            if (profile.IsOriginal)
+            if (!profile.IsOriginal)
             {
-                const string label = "Theo dõi khi Zalo gốc tự khởi động";
-                var originalStartup = new MenuItem { IsCheckable = true };
-                UpdateStartupMenuItem(originalStartup, OriginalWindowsStartup.IsEnabled(), label);
-                originalStartup.Click += delegate
-                {
-                    try
-                    {
-                        OriginalWindowsStartup.SetEnabled(profile, originalStartup.IsChecked);
-                        status.Text = originalStartup.IsChecked
-                            ? "Đã chuẩn bị theo dõi Zalo gốc từ lần đăng nhập Windows tiếp theo."
-                            : "Đã khôi phục lệnh tự khởi động của Zalo gốc.";
-                    }
-                    catch (Exception error) { Report(error); }
-                    UpdateStartupMenuItem(originalStartup, OriginalWindowsStartup.IsEnabled(), label);
-                };
-                menu.Items.Add(originalStartup);
-                return menu;
-            }
-            var startup = new MenuItem { IsCheckable = true };
-            UpdateStartupMenuItem(startup, profile.StartWithWindows);
-            startup.Click += delegate
-            {
-                SetProfileStartup(profile, startup.IsChecked);
+                var startup = new MenuItem { IsCheckable = true, IsEnabled = loggedIn };
                 UpdateStartupMenuItem(startup, profile.StartWithWindows);
-            };
-            menu.Items.Add(startup);
+                startup.Click += delegate
+                {
+                    SetProfileStartup(profile, startup.IsChecked);
+                    UpdateStartupMenuItem(startup, profile.StartWithWindows);
+                };
+                menu.Items.Add(startup);
+            }
             menu.Items.Add(new Separator { Style = (Style)Resources["ModernMenuSeparator"] });
             menu.Items.Add(new MenuItem { Header = "TÙY CHỈNH HỒ SƠ", Style = (Style)Resources["ModernMenuGroupLabel"] });
-            var rename = new MenuItem { Header = "Cập nhật tên hồ sơ…" };
+            var rename = new MenuItem { Header = "Cập nhật tên hồ sơ…", IsEnabled = loggedIn };
             var manualName = new MenuItem { Header = "Tự đổi…" };
             manualName.Click += delegate
             {
@@ -486,29 +508,36 @@ namespace ZaloManagerPoc
             var zaloName = new MenuItem { Header = "Cập nhật theo tên Zalo hiện tại" };
             zaloName.Click += async delegate { await UpdateFromZalo(profile, false); };
             rename.Items.Add(zaloName); menu.Items.Add(rename);
-            var avatar = new MenuItem { Header = "Đổi avatar / biểu tượng app…" };
+            var avatar = new MenuItem { Header = "Đổi avatar / biểu tượng app…", IsEnabled = loggedIn };
             var manualAvatar = new MenuItem { Header = "Tự đổi…" };
             manualAvatar.Click += delegate
             {
-                var dialog = new Microsoft.Win32.OpenFileDialog { Filter = "Ảnh|*.png;*.jpg;*.jpeg;*.bmp", Title = "Chọn avatar cho tài khoản clone" };
+                var dialog = new Microsoft.Win32.OpenFileDialog { Filter = "Ảnh|*.png;*.jpg;*.jpeg;*.bmp", Title = "Chọn avatar cho tài khoản" };
                 if (dialog.ShowDialog(this) != true) return;
+                string previousAvatar = profile.AvatarPath;
                 if (RunProfileEdit(profile, delegate
                 {
                     var image = new BitmapImage(); image.BeginInit(); image.CacheOption = BitmapCacheOption.OnLoad; image.UriSource = new Uri(dialog.FileName); image.EndInit(); image.Freeze();
                     string path = Path.Combine(Store.Root, "Avatars", profile.Id + "-" + Guid.NewGuid().ToString("N") + ".png");
                     Directory.CreateDirectory(Path.GetDirectoryName(path));
                     var encoder = new PngBitmapEncoder(); encoder.Frames.Add(BitmapFrame.Create(image)); using (var stream = File.Create(path)) encoder.Save(stream);
-                    profile.AvatarPath = path; ProfileActions.ApplyAvatar(profile);
-                })) NoticeDialog.Success(this, "Đã cập nhật avatar", "Ảnh đại diện mới đã được lưu cho hồ sơ.", profile.Name);
+                    profile.AvatarPath = path;
+                }))
+                {
+                    ProfileActions.DeleteAvatarFiles(previousAvatar);
+                    NoticeDialog.Success(this, "Đã cập nhật avatar", "Ảnh đại diện mới đã được lưu cho hồ sơ.", profile.Name);
+                }
             };
             avatar.Items.Add(manualAvatar);
             var zaloAvatar = new MenuItem { Header = "Cập nhật theo avatar Zalo hiện tại" };
             zaloAvatar.Click += async delegate { await UpdateFromZalo(profile, true); };
             avatar.Items.Add(zaloAvatar); menu.Items.Add(avatar);
-            var export = new MenuItem { Header = "Xuất data…" }; export.Click += async delegate { await Transfer(profile, false); }; menu.Items.Add(export);
-            var import = new MenuItem { Header = "Import data…" }; import.Click += async delegate { await Transfer(profile, true); }; menu.Items.Add(import);
-            var importNew = new MenuItem { Header = "Nhập thành hồ sơ mới…" }; importNew.Click += async delegate { await Transfer(profile, true, true); }; menu.Items.Add(importNew);
-            rename.Icon = MenuGlyph("\uE70F"); avatar.Icon = MenuGlyph("\uEB9F"); export.Icon = MenuGlyph("\uE898"); import.Icon = MenuGlyph("\uE8B5");
+            rename.Icon = MenuGlyph("\uE70F"); avatar.Icon = MenuGlyph("\uEB9F");
+            if (profile.IsOriginal) return menu;
+            var export = new MenuItem { Header = "Xuất data…", IsEnabled = loggedIn }; export.Click += async delegate { await Transfer(profile, false); }; menu.Items.Add(export);
+            var import = new MenuItem { Header = "Import data…", IsEnabled = loggedIn }; import.Click += async delegate { await Transfer(profile, true); }; menu.Items.Add(import);
+            var importNew = new MenuItem { Header = "Nhập thành hồ sơ mới…", IsEnabled = loggedIn }; importNew.Click += async delegate { await Transfer(profile, true, true); }; menu.Items.Add(importNew);
+            export.Icon = MenuGlyph("\uE898"); import.Icon = MenuGlyph("\uE8B5");
             menu.Items.Insert(menu.Items.IndexOf(export), new Separator { Style = (Style)Resources["ModernMenuSeparator"] });
             menu.Items.Insert(menu.Items.IndexOf(export), new MenuItem { Header = "DỮ LIỆU HỒ SƠ", Style = (Style)Resources["ModernMenuGroupLabel"] });
             return menu;
@@ -563,9 +592,28 @@ namespace ZaloManagerPoc
             }
         }
 
+        private void SaveProfileChanges(Profile profile)
+        {
+            if (profile.IsOriginal) Store.SaveOriginal(profile);
+            else Store.Save(profiles);
+        }
+
         private bool RunProfileEdit(Profile profile, Action edit)
         {
-            try { edit(); Store.Save(profiles); ProfileActions.CreateShortcut(profile); Store.Save(profiles); ProfileActions.ApplyAvatar(profile); RefreshStatus(); return true; }
+            try
+            {
+                edit();
+                SaveProfileChanges(profile);
+                if (!String.IsNullOrEmpty(profile.ShortcutPath) && File.Exists(profile.ShortcutPath))
+                {
+                    ProfileActions.CreateShortcut(profile);
+                    SaveProfileChanges(profile);
+                }
+                else ProfileActions.RefreshShellShortcuts(profile, false);
+                ProfileActions.ApplyAvatar(profile);
+                RefreshStatus();
+                return true;
+            }
             catch (Exception exception) { Report(exception); return false; }
         }
         private async Task UpdateFromZalo(Profile profile, bool avatar)
@@ -578,15 +626,17 @@ namespace ZaloManagerPoc
                 var identity = await Task.Run(() => IdentityReader.Read(profile));
                 if (avatar)
                 {
+                    string previousAvatar = profile.AvatarPath;
                     string path = await Task.Run(() => IdentityReader.DownloadAvatar(profile, identity));
-                    if (!RunProfileEdit(profile, () => { profile.AvatarPath = path; ProfileActions.ApplyAvatar(profile); })) return;
+                    if (!RunProfileEdit(profile, () => profile.AvatarPath = path)) return;
+                    ProfileActions.DeleteAvatarFiles(previousAvatar);
                 }
                 else
                 {
                     if (String.IsNullOrWhiteSpace(identity.Name)) throw new InvalidDataException("Zalo chưa có tên hiển thị trong cache của tài khoản này.");
                     if (!RunProfileEdit(profile, () => profile.Name = identity.Name)) return;
                 }
-                status.Text = avatar ? "Đã cập nhật avatar cho hồ sơ, taskbar và shortcut Desktop." : "Đã cập nhật tên hồ sơ theo Zalo hiện tại.";
+                status.Text = avatar ? "Đã cập nhật avatar hồ sơ theo Zalo hiện tại." : "Đã cập nhật tên hồ sơ theo Zalo hiện tại.";
                 NoticeDialog.Success(this, avatar ? "Đã cập nhật avatar" : "Đã cập nhật tên hồ sơ", status.Text, profile.Name);
             }
             catch (Exception exception) { Report(exception); }

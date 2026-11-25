@@ -50,7 +50,7 @@ namespace ZaloManagerPoc
                 notifyIcon.Icon = SystemIcons.Application;
             }
 
-            notifyIcon.Text = "Zalo Manager · Đang theo dõi tin nhắn thu hồi";
+            notifyIcon.Text = "Zalo Manager";
             notifyIcon.Visible = true;
 
             var contextMenu = new ContextMenuStrip();
@@ -130,14 +130,6 @@ namespace ZaloManagerPoc
         {
             if (mainWindow != null)
             {
-                var mgr = mainWindow as ManagerWindow;
-                if (mgr != null)
-                {
-                    foreach (var rw in System.Linq.Enumerable.ToList(mgr.openRecallWindows.Values))
-                    {
-                        if (rw != null && rw.IsLoaded) rw.Hide();
-                    }
-                }
                 mainWindow.WindowState = WindowState.Minimized;
                 mainWindow.ShowInTaskbar = false;
                 mainWindow.Hide();
@@ -162,8 +154,6 @@ namespace ZaloManagerPoc
                     SetForegroundWindow(helper.Handle);
                 }
 
-                var mgr = mainWindow as ManagerWindow;
-                if (mgr != null) mgr.RestoreOpenRecallWindows();
             }
         }
 
@@ -195,23 +185,12 @@ namespace ZaloManagerPoc
             try
             {
                 if (manager != null) await manager.StopStartupLaunchAsync();
-                await CdpMessageWatcher.StopForShutdown();
-                if (!await System.Threading.Tasks.Task.Run(() => CdpMessageWatcher.IncomingMessageCache.Flush()))
-                {
-                    IsExiting = false;
-                    if (manager != null) manager.UpdateShutdownState();
-                CdpMessageWatcher.ResumeAfterFailedShutdown();
-                    RestoreMainWindow();
-                    NoticeDialog.Show(mainWindow, "Chưa lưu được cache", "Kiểm tra dung lượng và quyền ghi rồi chọn Thoát hoàn toàn để thử lại.");
-                    return;
-                }
             }
             catch (Exception error)
             {
                 Store.Log(error);
                 IsExiting = false;
                 if (manager != null) manager.UpdateShutdownState();
-                CdpMessageWatcher.ResumeAfterFailedShutdown();
                 RestoreMainWindow();
                 NoticeDialog.Show(mainWindow, "Chưa thể thoát", "Không hoàn tất được việc lưu dữ liệu. Có thể thử thoát lại.");
                 return;

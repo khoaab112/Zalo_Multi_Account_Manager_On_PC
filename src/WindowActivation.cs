@@ -15,7 +15,7 @@ namespace ZaloManagerPoc
         [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int GetClassName(IntPtr window, StringBuilder name, int size);
         [DllImport("user32.dll")] private static extern int GetWindowTextLength(IntPtr window);
         [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int GetWindowText(IntPtr window, StringBuilder text, int size);
-        [DllImport("user32.dll")] private static extern bool IsWindowVisible(IntPtr window);
+        [DllImport("user32.dll")] internal static extern bool IsWindowVisible(IntPtr window);
         [DllImport("user32.dll")] private static extern bool IsIconic(IntPtr window);
         [DllImport("user32.dll")] private static extern bool ShowWindowAsync(IntPtr window, int command);
         [DllImport("user32.dll")] private static extern bool SetForegroundWindow(IntPtr window);
@@ -32,14 +32,32 @@ namespace ZaloManagerPoc
                 uint pid; GetWindowThreadProcessId(window, out pid);
                 if (!ids.Contains((int)pid)) return true;
                 var name = new StringBuilder(256); GetClassName(window, name, name.Capacity);
-                var title = new StringBuilder(256); GetWindowText(window, title, title.Capacity);
-                if (String.Equals(title.ToString(), "Shared Worker", StringComparison.OrdinalIgnoreCase)) return true;
+                string className = name.ToString();
+                if (className != "Chrome_WidgetWin_1" &&
+                    !(className.StartsWith("Sandbox:", StringComparison.OrdinalIgnoreCase) &&
+                      className.EndsWith(":Chrome_WidgetWin_1", StringComparison.Ordinal))) return true;
+                string title = Title(window);
+                if (title.Length == 0 || String.Equals(title, "Shared Worker", StringComparison.OrdinalIgnoreCase)) return true;
                 NativeRect rect;
-                if (name.ToString() == "Chrome_WidgetWin_1" && GetWindowTextLength(window) > 0 && GetWindowRect(window, out rect) &&
+                if (GetWindowRect(window, out rect) &&
                     (IsIconic(window) || (rect.Right - rect.Left >= 200 && rect.Bottom - rect.Top >= 100))) windows.Add(window);
                 return true;
             }, IntPtr.Zero);
             return windows.OrderByDescending(IsWindowVisible).ToList();
+        }
+
+        internal static string Title(IntPtr window)
+        {
+            var title = new StringBuilder(Math.Max(2, GetWindowTextLength(window) + 1));
+            GetWindowText(window, title, title.Capacity);
+            return title.ToString();
+        }
+
+        internal static int OwnerProcessId(IntPtr window)
+        {
+            uint pid;
+            GetWindowThreadProcessId(window, out pid);
+            return (int)pid;
         }
 
         public static bool Restore(Profile profile)

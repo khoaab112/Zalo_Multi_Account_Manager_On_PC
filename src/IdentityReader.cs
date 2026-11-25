@@ -17,7 +17,29 @@ namespace ZaloManagerPoc
     public static class IdentityReader
     {
         public static AccountIdentity Read(Profile profile)
-        { return ReadDirectory(profile.DataPath); }
+        {
+            if (!profile.IsOriginal) return ReadDirectory(profile.DataPath);
+            string directory = profile.DataPath;
+            string activeId = Directory.GetFiles(directory, "ftsm_*.db")
+                .Select(path => new
+                {
+                    Id = Path.GetFileNameWithoutExtension(path).Substring(5),
+                    UpdatedUtc = File.Exists(path + "-wal")
+                        ? new[] { File.GetLastWriteTimeUtc(path), File.GetLastWriteTimeUtc(path + "-wal") }.Max()
+                        : File.GetLastWriteTimeUtc(path)
+                })
+                .Where(item => item.Id.Length > 0 && item.Id.All(Char.IsDigit))
+                .OrderByDescending(item => item.UpdatedUtc)
+                .Select(item => item.Id)
+                .FirstOrDefault();
+            if (String.IsNullOrEmpty(activeId))
+                throw new InvalidDataException("Chưa xác định tài khoản trong Zalo gốc. Đăng nhập Zalo trước hoặc dùng Tự đổi.");
+            string db = Path.Combine(directory, @"Database\_production\Storage.db");
+            var identity = TryReadById(db, activeId);
+            if (identity == null)
+                throw new InvalidDataException("Chưa có tên và avatar của tài khoản Zalo gốc hiện tại trong cache. Thử lại sau khi Zalo đồng bộ.");
+            return identity;
+        }
 
         public static AccountIdentity ReadDirectory(string directory)
         {
@@ -26,12 +48,19 @@ namespace ZaloManagerPoc
                 .Where(id => id.Length > 0 && id.All(Char.IsDigit)).Distinct().ToList();
             if (ids.Count != 1) throw new InvalidDataException("Chưa xác định duy nhất tài khoản trong hồ sơ. Đăng nhập Zalo trước hoặc dùng Tự đổi.");
             string db = Path.Combine(directory, @"Database\_production\Storage.db");
-            var rows = Query(db, "SELECT val FROM [info-cache] WHERE [key]='0_" + ids[0] + "'", 1);
-            if (rows.Count != 1) throw new InvalidDataException("Chưa có tên và avatar của chính tài khoản này trong cache. Thử lại sau khi Zalo đồng bộ.");
+            var identity = TryReadById(db, ids[0]);
+            if (identity == null) throw new InvalidDataException("Chưa có tên và avatar của chính tài khoản này trong cache. Thử lại sau khi Zalo đồng bộ.");
+            return identity;
+        }
+
+        private static AccountIdentity TryReadById(string db, string accountId)
+        {
+            var rows = Query(db, "SELECT val FROM [info-cache] WHERE [key] IN ('0_" + accountId + "','1_" + accountId + "') ORDER BY [key] LIMIT 1", 1);
+            if (rows.Count != 1) return null;
             using (var stream = new MemoryStream(Encoding.UTF8.GetBytes(rows[0][0])))
             {
                 var identity = (AccountIdentity)new System.Runtime.Serialization.Json.DataContractJsonSerializer(typeof(AccountIdentity)).ReadObject(stream);
-                identity.AccountId = ids[0];
+                identity.AccountId = accountId;
                 return identity;
             }
         }
