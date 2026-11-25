@@ -39,18 +39,23 @@ namespace ZaloManagerPoc
         }
         public static void SaveShortcut(string path, Profile profile, string icon)
         {
+            SaveManagerShortcut(path, ProfileLaunchArguments(profile), profile.Name, icon);
+            Shortcut(path, profile);
+        }
+
+        internal static void SaveManagerShortcut(string path, string arguments, string description, string icon)
+        {
             var link = (IShellLinkW)new ShellLink();
             try
             {
                 string launcher = typeof(Program).Assembly.Location;
                 link.SetPath(launcher);
-                link.SetArguments(ProfileLaunchArguments(profile));
+                link.SetArguments(arguments);
                 link.SetWorkingDirectory(System.IO.Path.GetDirectoryName(launcher));
-                link.SetDescription(profile.Name); link.SetIconLocation(icon, 0);
+                link.SetDescription(description); link.SetIconLocation(icon ?? launcher, 0);
                 ((System.Runtime.InteropServices.ComTypes.IPersistFile)link).Save(path, true);
             }
             finally { Marshal.ReleaseComObject(link); }
-            Shortcut(path, profile);
         }
         private static string ProfileLaunchArguments(Profile profile)
         {

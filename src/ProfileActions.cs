@@ -444,7 +444,34 @@ namespace ZaloManagerPoc
             var shortcut = new MenuItem { Header = "Tạo shortcut", Tag = "Tạo Shortcut", DataContext = profile, Icon = MenuGlyph("\uE71B") };
             shortcut.Click += RowAction;
             menu.Items.Add(shortcut);
-            if (profile.IsOriginal) return menu;
+            if (profile.IsOriginal)
+            {
+                const string label = "Theo dõi khi Zalo gốc tự khởi động";
+                var originalStartup = new MenuItem { IsCheckable = true };
+                UpdateStartupMenuItem(originalStartup, OriginalWindowsStartup.IsEnabled(), label);
+                originalStartup.Click += delegate
+                {
+                    try
+                    {
+                        OriginalWindowsStartup.SetEnabled(profile, originalStartup.IsChecked);
+                        status.Text = originalStartup.IsChecked
+                            ? "Đã chuẩn bị theo dõi Zalo gốc từ lần đăng nhập Windows tiếp theo."
+                            : "Đã khôi phục lệnh tự khởi động của Zalo gốc.";
+                    }
+                    catch (Exception error) { Report(error); }
+                    UpdateStartupMenuItem(originalStartup, OriginalWindowsStartup.IsEnabled(), label);
+                };
+                menu.Items.Add(originalStartup);
+                return menu;
+            }
+            var startup = new MenuItem { IsCheckable = true };
+            UpdateStartupMenuItem(startup, profile.StartWithWindows);
+            startup.Click += delegate
+            {
+                SetProfileStartup(profile, startup.IsChecked);
+                UpdateStartupMenuItem(startup, profile.StartWithWindows);
+            };
+            menu.Items.Add(startup);
             menu.Items.Add(new Separator { Style = (Style)Resources["ModernMenuSeparator"] });
             menu.Items.Add(new MenuItem { Header = "TÙY CHỈNH HỒ SƠ", Style = (Style)Resources["ModernMenuGroupLabel"] });
             var rename = new MenuItem { Header = "Cập nhật tên hồ sơ…" };
@@ -488,6 +515,53 @@ namespace ZaloManagerPoc
         }
         private static TextBlock MenuGlyph(string glyph)
         { return new TextBlock { Text = glyph, FontFamily = new System.Windows.Media.FontFamily("Segoe MDL2 Assets"), FontSize = 15, VerticalAlignment = VerticalAlignment.Center }; }
+
+        private static void UpdateStartupMenuItem(MenuItem item, bool enabled, string label = "Tự mở khi đăng nhập Windows")
+        {
+            var header = new Grid();
+            header.ColumnDefinitions.Add(new ColumnDefinition());
+            header.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            header.Children.Add(new TextBlock { Text = label, VerticalAlignment = VerticalAlignment.Center });
+            var badge = new Border
+            {
+                Background = ModernBrush(enabled ? "#DCFCE7" : "#FEE2E2"),
+                CornerRadius = new CornerRadius(8),
+                Margin = new Thickness(12, 0, 0, 0),
+                Padding = new Thickness(8, 2, 8, 2),
+                Child = new TextBlock
+                {
+                    Text = enabled ? "Bật" : "Tắt",
+                    Foreground = ModernBrush(enabled ? "#166534" : "#991B1B"),
+                    FontSize = 12,
+                    FontWeight = FontWeights.SemiBold
+                }
+            };
+            Grid.SetColumn(badge, 1);
+            header.Children.Add(badge);
+            item.Header = header;
+            item.IsChecked = enabled;
+            System.Windows.Automation.AutomationProperties.SetName(item, label);
+        }
+
+        private void SetProfileStartup(Profile profile, bool enabled)
+        {
+            if (busy || !profiles.Contains(profile)) return;
+            bool previous = profile.StartWithWindows;
+            profile.StartWithWindows = enabled;
+            try
+            {
+                Store.Save(profiles);
+                status.Text = enabled ? "Đã bật tự mở “" + profile.Name + "” khi đăng nhập Windows."
+                    : "Đã tắt tự mở “" + profile.Name + "” khi đăng nhập Windows.";
+                if (enabled && !WindowsStartup.IsRegistered())
+                    status.Text += " Bật Khởi động cùng hệ thống ở đầu cửa sổ để áp dụng.";
+            }
+            catch (Exception error)
+            {
+                profile.StartWithWindows = previous;
+                Report(error);
+            }
+        }
 
         private bool RunProfileEdit(Profile profile, Action edit)
         {

@@ -18,6 +18,7 @@ namespace ZaloManagerPoc
         private const string ProfileNameRequired = "Vui lòng nhập tên hồ sơ.";
         private TextBlock profileCount;
         private TextBlock profileStorageTotal;
+        private StackPanel managerHeaderActions;
 
         private static Brush ModernBrush(string color) { return (Brush)new BrushConverter().ConvertFromString(color); }
         private static void Detach(FrameworkElement element)
@@ -68,12 +69,18 @@ namespace ZaloManagerPoc
             root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
             Content = root;
 
-            var heading = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 0, 0, 18) };
+            var heading = new Grid { Margin = new Thickness(0, 0, 0, 18) };
+            heading.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            heading.ColumnDefinitions.Add(new ColumnDefinition());
+            heading.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
             heading.Children.Add(new Image { Source = logo, Width = 48, Height = 48, Stretch = Stretch.Uniform, Margin = new Thickness(0, 0, 12, 0), VerticalAlignment = VerticalAlignment.Center });
             var titles = new StackPanel();
             titles.Children.Add(new TextBlock { Text = "Quản lý hồ sơ Zalo", FontSize = 22, FontWeight = FontWeights.Bold });
             titles.Children.Add(new TextBlock { Text = "Mỗi hồ sơ có bản sao chương trình và dữ liệu riêng. Đăng nhập trực tiếp trong cửa sổ Zalo.", FontSize = 12.5, Foreground = ModernBrush("#64748B"), Margin = new Thickness(0, 2, 0, 0), TextWrapping = TextWrapping.Wrap });
-            heading.Children.Add(titles); root.Children.Add(heading);
+            Grid.SetColumn(titles, 1); heading.Children.Add(titles);
+            managerHeaderActions = CreateManagerHeaderActions();
+            Grid.SetColumn(managerHeaderActions, 2); heading.Children.Add(managerHeaderActions);
+            root.Children.Add(heading);
 
             var baseBody = new Grid(); baseBody.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto }); baseBody.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto }); baseBody.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
             var baseTop = new Grid(); baseTop.ColumnDefinitions.Add(new ColumnDefinition()); baseTop.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
@@ -152,7 +159,11 @@ namespace ZaloManagerPoc
             profileSummary.Children.Add(profileCount);
             Grid.SetColumn(profileSummary, 1); addRow.Children.Add(profileSummary); Grid.SetRow(addRow, 2); root.Children.Add(addRow);
             StyleProfileTable();
-            var table = Card(grid); table.ClipToBounds = true; Grid.SetRow(table, 3); root.Children.Add(table);
+            var tableContent = new Grid();
+            tableContent.Children.Add(grid);
+            tableContent.Children.Add(CreateProfileTableLoading());
+            grid.IsEnabled = !loadingOnStartup;
+            var table = Card(tableContent); table.ClipToBounds = true; Grid.SetRow(table, 3); root.Children.Add(table);
             grid.SizeChanged += delegate
             {
                 grid.Clip = new RectangleGeometry(new Rect(0, 0, grid.ActualWidth, grid.ActualHeight), 11, 11);
@@ -163,8 +174,90 @@ namespace ZaloManagerPoc
                 for (int index = 0; index < widths.Length; index++)
                     if (grid.Columns[index].Width.Value != widths[index]) grid.Columns[index].Width = new DataGridLength(widths[index]);
             };
-            status.FontSize = 12.5; status.Foreground = ModernBrush("#64748B"); status.Margin = new Thickness(0, 12, 0, 0); status.Text = "Sẵn sàng · Cập nhật được thực hiện thủ công.";
+            status.FontSize = 12.5; status.Foreground = ModernBrush("#64748B"); status.Margin = new Thickness(0, 12, 0, 0); status.Text = "";
             Grid.SetRow(status, 4); root.Children.Add(status); RefreshStatus();
+        }
+
+        private StackPanel CreateManagerHeaderActions()
+        {
+            var actions = new StackPanel
+            {
+                Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(12, 0, 0, 0), IsEnabled = !loadingOnStartup && !busy
+            };
+            const string startupLabel = "Khởi động cùng hệ thống";
+            var startup = new ToggleButton
+            {
+                IsChecked = WindowsStartup.IsRegistered(), Background = ModernBrush("#EAF5FD"),
+                Foreground = ModernBrush("#164562"), BorderBrush = ModernBrush("#C7E1F3"),
+                BorderThickness = new Thickness(1), Padding = new Thickness(12, 7, 12, 7),
+                Height = 36, Cursor = System.Windows.Input.Cursors.Hand,
+                ToolTip = "Mở Manager khi đăng nhập Windows và tự mở các clone đã chọn."
+            };
+            var border = new FrameworkElementFactory(typeof(Border), "ToggleChrome");
+            border.SetValue(Border.CornerRadiusProperty, new CornerRadius(8));
+            foreach (var property in new[] { Border.BackgroundProperty, Border.BorderBrushProperty, Border.BorderThicknessProperty, Border.PaddingProperty })
+                border.SetBinding(property, new Binding(property.Name) { RelativeSource = RelativeSource.TemplatedParent });
+            border.AppendChild(new FrameworkElementFactory(typeof(ContentPresenter)));
+            var template = new ControlTemplate(typeof(ToggleButton)) { VisualTree = border };
+            var hover = new Trigger { Property = IsMouseOverProperty, Value = true };
+            hover.Setters.Add(new Setter(Border.BackgroundProperty, ModernBrush("#DDEFFD"), "ToggleChrome"));
+            var disabled = new Trigger { Property = IsEnabledProperty, Value = false };
+            disabled.Setters.Add(new Setter(OpacityProperty, 0.45, "ToggleChrome"));
+            template.Triggers.Add(hover);
+            template.Triggers.Add(disabled);
+            startup.Template = template;
+            var body = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
+            body.Children.Add(MenuGlyph("\uE770"));
+            body.Children.Add(new TextBlock { Text = startupLabel, FontWeight = FontWeights.SemiBold,
+                VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(7, 0, 10, 0) });
+            var track = new Border { Width = 34, Height = 18, CornerRadius = new CornerRadius(9), VerticalAlignment = VerticalAlignment.Center };
+            var thumb = new System.Windows.Shapes.Ellipse { Width = 12, Height = 12, Fill = Brushes.White, VerticalAlignment = VerticalAlignment.Center };
+            track.Child = thumb;
+            body.Children.Add(track);
+            startup.Content = body;
+            System.Windows.Automation.AutomationProperties.SetName(startup, startupLabel);
+            Action refresh = delegate
+            {
+                bool enabled = WindowsStartup.IsRegistered();
+                startup.IsChecked = enabled;
+                track.Background = ModernBrush(enabled ? "#0068FF" : "#64748B");
+                thumb.HorizontalAlignment = enabled ? HorizontalAlignment.Right : HorizontalAlignment.Left;
+                thumb.Margin = enabled ? new Thickness(0, 0, 3, 0) : new Thickness(3, 0, 0, 0);
+            };
+            refresh();
+            startup.Click += delegate
+            {
+                try
+                {
+                    bool enabled = startup.IsChecked == true;
+                    WindowsStartup.SetRegistration(enabled);
+                    status.Text = enabled ? "Đã bật khởi động Zalo Manager cùng Windows." : "Đã tắt khởi động Zalo Manager cùng Windows.";
+                }
+                catch (Exception error) { Report(error); }
+                finally { refresh(); }
+            };
+            actions.Children.Add(startup);
+
+            var exit = new Button
+            {
+                Height = 36, Margin = new Thickness(8, 0, 0, 0), Padding = new Thickness(12, 6, 12, 6),
+                Style = (Style)Resources["DangerGhostButton"], ToolTip = "Thoát hoàn toàn Zalo Manager"
+            };
+            var exitContent = new StackPanel { Orientation = Orientation.Horizontal };
+            exitContent.Children.Add(new System.Windows.Shapes.Path
+            {
+                Data = Geometry.Parse("M 8,2 H 3 V 14 H 8 M 6,8 H 14 M 11,5 L 14,8 L 11,11"),
+                Stroke = ModernBrush("#DC2626"), StrokeThickness = 1.5,
+                StrokeStartLineCap = PenLineCap.Round, StrokeEndLineCap = PenLineCap.Round,
+                Width = 14, Height = 14, Stretch = Stretch.Uniform, VerticalAlignment = VerticalAlignment.Center
+            });
+            exitContent.Children.Add(new TextBlock { Text = "Thoát", VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(6, 0, 0, 0) });
+            exit.Content = exitContent;
+            System.Windows.Automation.AutomationProperties.SetName(exit, "Thoát");
+            exit.Click += delegate { TrayManager.RequestExit(); };
+            actions.Children.Add(exit);
+            return actions;
         }
 
         private void StyleProfileTable()

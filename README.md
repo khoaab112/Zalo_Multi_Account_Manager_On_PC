@@ -12,6 +12,9 @@
 - Cấu hình hồ sơ nằm trong `%LOCALAPPDATA%\ZaloManagerPoC`. Dữ liệu đăng nhập Zalo nằm trong `%APPDATA%` theo từng hồ sơ. Lịch sử tin thu hồi được lưu riêng theo tài khoản trong kho cục bộ mã hóa cho người dùng Windows hiện tại. Đọc tin chỉ bỏ số thông báo, còn nội dung được giữ đến khi bấm Xóa.
 - Khi mở hồ sơ từ Manager, ứng dụng bật CDP trên cổng localhost riêng và theo dõi frame WebSocket. Di chuột lên trạng thái hồ sơ để xem kết nối và bộ đếm frame gửi/nhận.
 - Shortcut tạo từ Manager mở đúng hồ sơ qua Manager để bật CDP cho phiên mới. Với shortcut cũ, chọn **… → Tạo Shortcut** để cập nhật. Nếu hồ sơ hiện **Chưa theo dõi**, dừng rồi mở lại hồ sơ. Listener tự kết nối lại và dừng khi đóng Manager.
+- Bật **Khởi động cùng hệ thống** ở góc trên bên phải để Manager chạy dưới khay khi đăng nhập Windows. Chọn **… → Tự mở khi đăng nhập Windows** ở các clone muốn mở cùng Manager. Manager chờ 8 giây rồi mở từng hồ sơ đã chọn, cách nhau ít nhất 3 giây, và bỏ qua hồ sơ đang chạy. Tắt công tắc chung để dừng lượt tự mở lần đăng nhập sau và giữ các lựa chọn theo hồ sơ.
+- Bấm **Thoát** rồi xác nhận **Thoát hoàn toàn** để lưu dữ liệu và kết thúc Manager. Zalo tiếp tục chạy và Manager bắt đầu theo dõi lại khi được mở.
+- Với Zalo gốc, bật khởi động cùng Windows trong Zalo trước, rồi chọn **… → Theo dõi khi Zalo gốc tự khởi động** trong Manager. Từ lần đăng nhập Windows tiếp theo, trình mở khởi động Zalo gốc với cổng theo dõi cục bộ nếu Thu hồi đang bật. Manager kết nối khi được mở. Tắt tùy chọn để khôi phục lệnh tự khởi động ban đầu của Zalo.
 - Sự kiện C# `CdpMessageWatcher.FrameReceived` cung cấp ID hồ sơ, chiều truyền, opcode và payload trong bộ nhớ. Payload binary dùng Base64. Việc giải mã thành sự kiện tin nhắn Zalo cần được triển khai tiếp.
 - Mã nguồn tại `src/`, giao diện và biểu tượng tại `src/` và `assets/`, kiểm thử tại `tests/`.
 

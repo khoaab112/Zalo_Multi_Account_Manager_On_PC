@@ -285,7 +285,8 @@ namespace ZaloManagerPoc
                     if (port == 0) port = FindPort(profile);
                     if (port == 0)
                     {
-                        session.Status = "CDP cần dừng rồi mở lại hồ sơ";
+                        session.Status = profile.IsOriginal ? "Zalo gốc đang mở nhưng chưa có cổng CDP"
+                            : "CDP cần dừng rồi mở lại hồ sơ";
                         await Task.Delay(5000, token);
                         continue;
                     }

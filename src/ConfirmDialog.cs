@@ -55,6 +55,16 @@ namespace ZaloManagerPoc
         public static bool Ask(Window owner,string title,string prefix,string target,string note,string confirmText,bool danger=true)
         {return new ConfirmDialog(title,prefix,target,note,confirmText,danger){Owner=owner}.ShowDialog()==true;}
 
+        internal static ConfirmDialog CreateManagerExit(Window owner)
+        {
+            var dialog = new ConfirmDialog("Thoát Zalo Manager", "Bạn muốn thoát", "Zalo Manager",
+                "Manager sẽ lưu dữ liệu và kết thúc các tác vụ nền. Theo dõi tin nhắn và lưu tin thu hồi sẽ tạm dừng đến khi bạn mở lại Manager. Các cửa sổ Zalo đang chạy vẫn hoạt động.",
+                "Thoát hoàn toàn", true);
+            if (owner != null && owner.IsVisible) dialog.Owner = owner;
+            else dialog.WindowStartupLocation = WindowStartupLocation.CenterScreen;
+            return dialog;
+        }
+
         internal static bool AskRecallDeletion(Window owner, string profileName, string conversationName)
         {
             bool wholeProfile = conversationName == null;

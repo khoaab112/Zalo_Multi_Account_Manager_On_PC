@@ -33,6 +33,7 @@ namespace ZaloManagerPoc
         [DataMember] public string AvatarPath { get; set; }
         [DataMember] public string ShortcutPath { get; set; }
         [DataMember] public int PatchRevision { get; set; }
+        [DataMember(EmitDefaultValue = false)] public bool StartWithWindows { get; set; }
         public bool IsOriginal { get { return Id == "original"; } }
         public string Status { get; set; }
         public string UpdateStatus { get; set; }
@@ -164,6 +165,11 @@ namespace ZaloManagerPoc
                 throw new InvalidDataException("Hãy chọn Zalo trong thư mục cài đặt gốc.");
             string executable = Path.Combine(fullPath, "Zalo.exe");
             if (!File.Exists(Path.Combine(fullPath, "resources", "app.asar"))) throw new FileNotFoundException("Thiếu resources/app.asar tại nguồn gốc.");
+            VerifySignature(executable);
+        }
+
+        internal static void VerifySignature(string executable)
+        {
             string script = "Import-Module ($PSHOME + '\\Modules\\Microsoft.PowerShell.Security') -ErrorAction Stop; $s=Get-AuthenticodeSignature -LiteralPath '" + executable.Replace("'", "''") + "'; if($s.Status -eq 'Valid' -and $s.SignerCertificate.Subject -match '(?i)(CN|O)=VNG'){exit 0}; exit 1";
             var info = new ProcessStartInfo(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), @"WindowsPowerShell\v1.0\powershell.exe"),
                 "-NoProfile -NonInteractive -EncodedCommand " + Convert.ToBase64String(Encoding.Unicode.GetBytes(script)))
@@ -251,18 +257,42 @@ namespace ZaloManagerPoc
                 return BitConverter.ToString(sha.ComputeHash(stream)).Replace("-", "");
         }
 
+        private static int ReadAsarHeader(Stream stream, out bool hasIntegrity)
+        {
+            using (var reader = new BinaryReader(stream, Encoding.UTF8, true))
+            {
+                if (stream.Length < 16 || reader.ReadUInt32() != 4)
+                    throw new InvalidDataException("Định dạng ASAR chưa được hỗ trợ.");
+                long payload = 8L + reader.ReadUInt32();
+                reader.ReadUInt32();
+                long headerLength = reader.ReadUInt32();
+                if (payload > stream.Length || payload > Int32.MaxValue || payload < 16 ||
+                    headerLength <= 0 || headerLength > payload - 16)
+                    throw new InvalidDataException("Header ASAR không hợp lệ.");
+                byte[] header = reader.ReadBytes((int)headerLength);
+                if (header.Length != headerLength) throw new InvalidDataException("Header ASAR không đầy đủ.");
+                hasIntegrity = Encoding.UTF8.GetString(header).Contains("\"integrity\"");
+                return (int)payload;
+            }
+        }
+
+        internal static bool SupportsCloneSource(string directory)
+        {
+            using (var stream = File.OpenRead(Path.Combine(directory, "resources", "app.asar")))
+            {
+                bool hasIntegrity;
+                ReadAsarHeader(stream, out hasIntegrity);
+                return !hasIntegrity;
+            }
+        }
+
         // Equal-length substitutions preserve ASAR file offsets. Only payload bytes are changed.
         public static byte[] Patch(byte[] source, string id)
         {
-            if (source.Length < 16 || BitConverter.ToUInt32(source, 0) != 4)
-                throw new InvalidDataException("Định dạng ASAR chưa được hỗ trợ.");
-            int payload = checked(8 + (int)BitConverter.ToUInt32(source, 4));
-            int headerLength = checked((int)BitConverter.ToUInt32(source, 12));
-            if (payload > source.Length || payload < 16 || headerLength <= 0 || headerLength > payload - 16)
-                throw new InvalidDataException("Header ASAR không hợp lệ.");
-            string header = Encoding.UTF8.GetString(source, 16, headerLength);
-            if (header.Contains("\"integrity\""))
-                throw new InvalidDataException("Phiên bản ASAR có kiểm tra integrity. Cần đánh giá tương thích riêng.");
+            int payload;
+            bool hasIntegrity;
+            using (var stream = new MemoryStream(source, false)) payload = ReadAsarHeader(stream, out hasIntegrity);
+            if (hasIntegrity) throw new InvalidDataException("Phiên bản ASAR có kiểm tra integrity. Cần đánh giá tương thích riêng.");
             byte[] result = (byte[])source.Clone();
             Replace(result, payload, "ZaloData", "zm" + id, true);
             Replace(result, payload, "com.vng.zalo", "zmgr.p" + id, true);
@@ -336,6 +366,7 @@ namespace ZaloManagerPoc
         {
             if (IsRunning(profile)) throw new InvalidOperationException("Hồ sơ đang chạy, chờ thoát Zalo để cập nhật.");
             var next = new Profile { Id = profile.Id, Name = profile.Name, AvatarPath = profile.AvatarPath, ShortcutPath = profile.ShortcutPath, Source = original.DirectoryPath,
+                StartWithWindows = profile.StartWithWindows,
                 ActiveDirectory = Path.Combine(Store.Root, "Releases", profile.Id, Guid.NewGuid().ToString("N")) };
             Prepare(next);
             if (next.SourceHash != original.PackageHash || next.InstalledVersion != original.Version)
@@ -434,18 +465,74 @@ namespace ZaloManagerPoc
 
         internal static bool OpenAndCheckWindow(Profile profile, bool track = true)
         {
+            return WithLaunchLock(profile, () => OpenProfile(profile, track), CancellationToken.None);
+        }
+
+        private static bool WithLaunchLock(Profile profile, Func<bool> open, CancellationToken token)
+        {
             using (var launch = new Mutex(false, "Local\\ZaloManagerProfileLaunch-" + profile.Id))
             {
-                try { launch.WaitOne(TimeSpan.FromSeconds(15)); }
+                int result = 0;
+                try
+                {
+                    if (token.CanBeCanceled)
+                        result = WaitHandle.WaitAny(new WaitHandle[] { launch, token.WaitHandle }, TimeSpan.FromSeconds(15));
+                    else if (!launch.WaitOne(TimeSpan.FromSeconds(15))) result = WaitHandle.WaitTimeout;
+                }
                 catch (AbandonedMutexException) { }
-                try { return OpenProfile(profile, track); }
-                finally { try { launch.ReleaseMutex(); } catch (ApplicationException) { } }
+                if (result == 1) token.ThrowIfCancellationRequested();
+                if (result != 0) throw new IOException("Hồ sơ đang được mở từ một thao tác khác. Hãy thử lại.");
+                try
+                {
+                    token.ThrowIfCancellationRequested();
+                    return open();
+                }
+                finally { launch.ReleaseMutex(); }
             }
+        }
+
+        internal static bool StartAtLogon(Profile profile, CancellationToken token)
+        {
+            return WithLaunchLock(profile, delegate
+            {
+                if (profile.IsOriginal || IsRunning(profile)) return false;
+                using (var process = StartProfileProcess(profile, true, false, token))
+                {
+                    for (int attempt = 0; attempt < 20; attempt++)
+                    {
+                        if (token.WaitHandle.WaitOne(500)) token.ThrowIfCancellationRequested();
+                        process.Refresh();
+                        if (process.HasExited || process.MainWindowHandle != IntPtr.Zero) break;
+                    }
+                }
+                return true;
+            }, token);
+        }
+
+        internal static void StartOriginalAtLogon(Profile profile, bool enableCdp)
+        {
+            WithLaunchLock(profile, delegate
+            {
+                if (IsRunning(profile)) return false;
+                StartOriginalProcess(profile, enableCdp);
+                return true;
+            }, CancellationToken.None);
         }
 
         private static bool OpenProfile(Profile profile, bool track)
         {
             bool running = IsRunning(profile);
+            if (profile.IsOriginal)
+            {
+                bool visible = running && WindowActivation.Restore(profile);
+                if (running)
+                {
+                    if (!visible) StartNativeOriginal(profile);
+                }
+                else StartOriginalProcess(profile, CdpMessageWatcher.IsRecallEnabled(profile.Id));
+                if (track) CdpMessageWatcher.Start(profile, 0);
+                return visible || WaitForProfileWindow(profile);
+            }
             int runningPort = running ? CdpMessageWatcher.FindPort(profile) : 0;
             if (running && runningPort > 0 && WindowActivation.Restore(profile))
             {
@@ -457,6 +544,50 @@ namespace ZaloManagerPoc
                 Stop(profile);
                 running = false;
             }
+            using (StartProfileProcess(profile, track, running, CancellationToken.None)) { }
+            return WaitForProfileWindow(profile);
+        }
+
+        private static bool WaitForProfileWindow(Profile profile)
+        {
+            for (int attempt = 0; attempt < 40; attempt++)
+            { System.Threading.Thread.Sleep(250); if (WindowActivation.Restore(profile)) return true; }
+            return false;
+        }
+
+        private static void StartOriginalProcess(Profile profile, bool enableCdp)
+        {
+            if (enableCdp)
+            {
+                using (var process = StartProfileProcess(profile, false, false, CancellationToken.None))
+                    if (!process.WaitForExit(2000)) return;
+                if (IsRunning(profile)) return;
+            }
+            StartNativeOriginal(profile);
+        }
+
+        private static void StartNativeOriginal(Profile profile)
+        {
+            string launcher = profile.Executable;
+            string directory = Path.GetDirectoryName(launcher);
+            if (Path.GetFileName(directory).StartsWith("Zalo-", StringComparison.OrdinalIgnoreCase))
+            {
+                string parent = Path.GetDirectoryName(directory);
+                string installedLauncher = Path.Combine(parent, "Zalo.exe");
+                if (File.Exists(installedLauncher)) launcher = installedLauncher;
+            }
+            Original.VerifySignature(launcher);
+            var startInfo = new ProcessStartInfo(launcher)
+            {
+                WorkingDirectory = Path.GetDirectoryName(launcher),
+                UseShellExecute = false
+            };
+            startInfo.EnvironmentVariables.Remove("ELECTRON_RUN_AS_NODE");
+            using (Process.Start(startInfo)) { }
+        }
+
+        private static Process StartProfileProcess(Profile profile, bool track, bool running, CancellationToken token)
+        {
             if (!profile.IsOriginal && (String.IsNullOrEmpty(profile.PatchedHash) || Hash(Path.Combine(profile.DirectoryPath, "resources", "app.asar")) != profile.PatchedHash))
                 throw new InvalidDataException("Gói ứng dụng đã thay đổi hoặc chuẩn bị chưa hoàn tất. Cần kiểm tra tương thích trước khi mở.");
             // Use Zalo's own single-instance handler for a tray-only session.
@@ -470,11 +601,14 @@ namespace ZaloManagerPoc
                 Arguments = "--remote-debugging-address=127.0.0.1 --remote-debugging-port=" + port
             };
             startInfo.EnvironmentVariables.Remove("ELECTRON_RUN_AS_NODE");
-            using (Process.Start(startInfo)) { }
-            if (track) CdpMessageWatcher.Start(profile, running ? 0 : port);
-            for (int attempt = 0; attempt < 40; attempt++)
-            { System.Threading.Thread.Sleep(250); if (WindowActivation.Restore(profile)) return true; }
-            return false;
+            token.ThrowIfCancellationRequested();
+            var process = Process.Start(startInfo);
+            try
+            {
+                if (track) CdpMessageWatcher.Start(profile, running ? 0 : port);
+                return process;
+            }
+            catch { if (process != null) process.Dispose(); throw; }
         }
 
         public static void Close(Profile profile)
@@ -525,9 +659,13 @@ namespace ZaloManagerPoc
         private readonly TextBlock resultIcon = new TextBlock { FontFamily = new FontFamily("Segoe UI Symbol"), FontSize = 20, Width = 28, TextAlignment = TextAlignment.Center, VerticalAlignment = VerticalAlignment.Center };
         private readonly Button detectButton = new Button { Content = "Kiểm tra Zalo gốc / đồng bộ", Padding = new Thickness(12, 7, 12, 7) };
         private bool busy;
+        private bool loadingOnStartup = true;
         private readonly Dictionary<Profile, string> displayedCdpStatus = new Dictionary<Profile, string>();
-        public ManagerWindow()
+        public ManagerWindow() : this(false) { }
+
+        internal ManagerWindow(bool windowsLogon, bool recallInitialized = false)
         {
+            deferStartupStorage = windowsLogon;
             profiles = new ObservableCollection<Profile>(Store.Load());
             Title = "Zalo Manager · PoC"; Width = 1440; Height = 720; MinWidth = 1100; MinHeight = 450;
             FontFamily = new FontFamily("Segoe UI"); FontSize = 14;
@@ -592,7 +730,7 @@ namespace ZaloManagerPoc
             status.Text = "PoC · Thoát ứng dụng quản lý để các cửa sổ Zalo tiếp tục chạy. Nút đóng gửi yêu cầu đóng cửa sổ, Zalo có thể thu nhỏ xuống khay hệ thống.";
             timer.Tick += delegate { if (!busy) UpdateProfileStatus(false); };
             timer.Start(); RefreshStatus();
-            Loaded += async delegate { await Synchronize(false, false); };
+            Loaded += async delegate { await Synchronize(false, false, !recallInitialized); };
             Loaded += delegate { TrayManager.Initialize(this); };
             Closing += delegate(object sender, System.ComponentModel.CancelEventArgs args)
             {
@@ -634,8 +772,21 @@ namespace ZaloManagerPoc
         }
         private void SetBusy(bool value)
         {
-            busy = value; toolbar.IsEnabled = !value; sourceToolbar.IsEnabled = !value; grid.IsEnabled = !value;
+            busy = value || TrayManager.IsExiting;
+            toolbar.IsEnabled = !busy;
+            sourceToolbar.IsEnabled = !busy;
+            grid.IsEnabled = !busy;
+            if (managerHeaderActions != null) managerHeaderActions.IsEnabled = !busy;
+            if (profileTableLoading != null)
+            {
+                profileLoadingCaption.Text = TrayManager.IsExiting ? "Đang lưu và thoát…" :
+                    loadingOnStartup ? "Đang tải hồ sơ…" : "Đang xử lý…";
+                profileTableLoading.Visibility = busy ? Visibility.Visible : Visibility.Collapsed;
+            }
         }
+
+        internal bool CanRequestExit { get { return !busy; } }
+        internal void UpdateShutdownState() { SetBusy(false); }
 
         private void SetSourceResult(string icon, string message, Brush color, bool loading)
         {
@@ -651,7 +802,7 @@ namespace ZaloManagerPoc
             }
         }
 
-        private async Task Synchronize(bool force = false, bool updateClones = true)
+        private async Task Synchronize(bool force = false, bool updateClones = true, bool initializeRecall = false)
         {
             if (busy) return;
             SetBusy(true);
@@ -660,9 +811,26 @@ namespace ZaloManagerPoc
             try
             {
                 if (force) Original.Invalidate();
-                var original = await Task.Run(() => Original.Detect());
+                var original = await Task.Run(() =>
+                {
+                    if (initializeRecall)
+                    {
+                        CdpMessageWatcher.IncomingMessageCache.Initialize();
+                        CdpMessageWatcher.ScheduleRecallMediaScan();
+                    }
+                    return Original.Detect();
+                });
                 ShowOriginal(original);
                 originalRow = new Profile { Id = "original", Name = "Zalo gốc", Source = original.DirectoryPath, InstalledVersion = original.Version, UpdateStatus = "Nguồn nhân bản" };
+                if (!await Task.Run(() => Instance.SupportsCloneSource(original.DirectoryPath)))
+                {
+                    foreach (var profile in profiles)
+                        profile.UpdateStatus = String.IsNullOrEmpty(profile.PatchedHash) ? "Chưa tạo được" : "Giữ bản đang dùng";
+                    await visibleLoading;
+                    SetSourceResult("•", "Zalo gốc " + original.Version + " có kiểm tra toàn vẹn ASAR. Manager chưa hỗ trợ tạo hoặc cập nhật clone từ bản này.", Brushes.DarkGoldenrod, false);
+                    status.Text = "Bạn vẫn có thể mở các hồ sơ clone đã chuẩn bị.";
+                    return;
+                }
                 int failed = 0, waiting = 0;
                 foreach (var profile in profiles.ToList())
                 {
@@ -705,7 +873,12 @@ namespace ZaloManagerPoc
                 baseSignature.Text = "Chưa xác minh"; baseSignature.Foreground = ModernBrush("#B45309");
                 Store.Log(exception);
             }
-            finally { SetBusy(false); RefreshStatus(); }
+            finally
+            {
+                if (!updateClones) loadingOnStartup = false;
+                SetBusy(false);
+                RefreshStatus();
+            }
         }
         private void AddColumn(string title, string property, double width)
         { grid.Columns.Add(new DataGridTextColumn { Header = title, Binding = new Binding(property), Width = width }); }
@@ -735,7 +908,8 @@ namespace ZaloManagerPoc
                 displayedCdpStatus.Clear();
                 profileStorageRefreshRequested = true;
             }
-            RefreshStorageUsage();
+            if (loadingOnStartup) return;
+            if (!deferStartupStorage) RefreshStorageUsage();
             if (processStatusScanning)
             {
                 processStatusRefreshRequested |= changed || refreshGrid;
@@ -813,13 +987,22 @@ namespace ZaloManagerPoc
                 var random = new Random();
                 do { id = random.Next(100000, 1000000).ToString(); }
                 while (profiles.Any(p => p.Id == id) || Directory.Exists(Path.Combine(Store.Root, "Instances", id)) || Directory.Exists(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "zm" + id)));
-                var profile = new Profile { Id = id, Name = name.Text.Trim(), Source = Instance.DetectSource() };
-                profiles.Add(profile); Store.Save(profiles);
+                var profile = new Profile { Id = id, Name = name.Text.Trim() };
                 status.Text = "Đang sao chép và chuẩn bị hồ sơ. Có thể mất vài phút…";
-                await Task.Run(() => Instance.Prepare(profile));
-                Store.Save(profiles); grid.SelectedItem = profile;
+                await Task.Run(() =>
+                {
+                    var original = Original.Detect();
+                    if (!Instance.SupportsCloneSource(original.DirectoryPath))
+                        throw new InvalidDataException("Zalo gốc " + original.Version +
+                            " có kiểm tra toàn vẹn ASAR. Manager chưa hỗ trợ tạo hồ sơ clone từ bản này.");
+                    profile.Source = original.DirectoryPath;
+                    Instance.Prepare(profile);
+                });
+                Store.Save(profiles.Concat(new[] { profile }));
+                profiles.Add(profile);
                 status.Text = "Đã chuẩn bị hồ sơ. Bấm Mở Zalo ở hàng hồ sơ để đăng nhập.";
                 RefreshStatus();
+                grid.SelectedItem = profile;
                 NoticeDialog.Success(this, "Tạo hồ sơ thành công", "Hồ sơ đã sẵn sàng. Mở Zalo để đăng nhập.", profile.Name);
             }
             catch (Exception exception) { Report(exception); }
@@ -848,21 +1031,41 @@ namespace ZaloManagerPoc
                 catch { }
             };
             try { Environment.SetEnvironmentVariable("ELECTRON_RUN_AS_NODE", null); } catch { }
+            if (args.Length == 1 && args[0] == OriginalWindowsStartup.Argument)
+            {
+                try
+                {
+                    if (OriginalWindowsStartup.IsEnabled())
+                        Instance.StartOriginalAtLogon(ResolveShortcutProfile("original"), CdpMessageWatcher.IsRecallEnabled("original"));
+                }
+                catch (Exception error)
+                {
+                    try { Directory.CreateDirectory(Store.Root); Store.Log(error); }
+                    catch (IOException) { }
+                    catch (UnauthorizedAccessException) { }
+                    Environment.ExitCode = 1;
+                }
+                return;
+            }
             ShellIdentity.SetManagerIdentity();
             // The file CDN can close the legacy Framework negotiation before returning HTTP.
             System.Net.ServicePointManager.SecurityProtocol = System.Net.SecurityProtocolType.Tls12;
             bool profileLaunch = args.Length == 2 && args[0] == "--open-profile";
+            bool windowsLogon = args.Length == 1 && args[0] == WindowsStartup.Argument;
+            if (windowsLogon && !WindowsStartup.IsRegistered()) return;
             bool owner;
+            using (var startupSignal = new EventWaitHandle(false, EventResetMode.AutoReset, WindowsStartup.SignalName))
             using (var mutex = new Mutex(true, "Local\\ZaloManagerPoC", out owner))
             {
                 if (!owner && !profileLaunch)
                 {
-                    TrayManager.SignalShowManager();
+                    if (windowsLogon) startupSignal.Set();
+                    else TrayManager.SignalShowManager();
                     return;
                 }
                 try
                 {
-                    if (owner)
+                    if (owner && profileLaunch)
                     {
                         CdpMessageWatcher.IncomingMessageCache.Initialize();
                         CdpMessageWatcher.ScheduleRecallMediaScan();
@@ -895,7 +1098,18 @@ namespace ZaloManagerPoc
                         }
                         catch { }
                     };
-                    app.Run(new ManagerWindow());
+                    var window = new ManagerWindow(windowsLogon, profileLaunch);
+                    if (windowsLogon)
+                    {
+                        window.ShowActivated = false;
+                        window.ShowInTaskbar = false;
+                        window.Loaded += delegate { TrayManager.HideToTray(); };
+                        startupSignal.Set();
+                    }
+                    var startupWait = ThreadPool.RegisterWaitForSingleObject(startupSignal,
+                        delegate { window.Dispatcher.BeginInvoke(new Action(window.RequestStartupLaunch)); }, null, Timeout.Infinite, false);
+                    try { app.Run(window); }
+                    finally { startupWait.Unregister(null); }
                 }
                 catch (Exception exception)
                 {

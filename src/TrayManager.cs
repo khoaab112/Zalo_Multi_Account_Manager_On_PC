@@ -60,7 +60,8 @@ namespace ZaloManagerPoc
 
             contextMenu.Items.Add(new ToolStripSeparator());
 
-            var exitItem = new ToolStripMenuItem("Thoát hoàn toàn", null, (s, e) => ExitApplication());
+            var exitItem = new ToolStripMenuItem("Thoát hoàn toàn", null, (s, e) => RequestExit());
+            contextMenu.Opening += delegate { exitItem.Enabled = CanRequestExit(); };
             contextMenu.Items.Add(exitItem);
 
             notifyIcon.ContextMenuStrip = contextMenu;
@@ -167,17 +168,38 @@ namespace ZaloManagerPoc
         }
 
         internal static bool IsExiting { get; private set; }
+        private static bool confirmingExit;
 
-        public static async void ExitApplication()
+        private static bool CanRequestExit()
+        {
+            var manager = mainWindow as ManagerWindow;
+            return !IsExiting && !confirmingExit && (manager == null || manager.CanRequestExit);
+        }
+
+        internal static void RequestExit()
+        {
+            if (!CanRequestExit()) return;
+            bool confirmed;
+            confirmingExit = true;
+            try { confirmed = ConfirmDialog.CreateManagerExit(mainWindow).ShowDialog() == true; }
+            finally { confirmingExit = false; }
+            if (confirmed) ExitApplication();
+        }
+
+        private static async void ExitApplication()
         {
             if (IsExiting) return;
             IsExiting = true;
+            var manager = mainWindow as ManagerWindow;
+            if (manager != null) manager.UpdateShutdownState();
             try
             {
+                if (manager != null) await manager.StopStartupLaunchAsync();
                 await CdpMessageWatcher.StopForShutdown();
                 if (!await System.Threading.Tasks.Task.Run(() => CdpMessageWatcher.IncomingMessageCache.Flush()))
                 {
                     IsExiting = false;
+                    if (manager != null) manager.UpdateShutdownState();
                 CdpMessageWatcher.ResumeAfterFailedShutdown();
                     RestoreMainWindow();
                     NoticeDialog.Show(mainWindow, "Chưa lưu được cache", "Kiểm tra dung lượng và quyền ghi rồi chọn Thoát hoàn toàn để thử lại.");
@@ -188,6 +210,7 @@ namespace ZaloManagerPoc
             {
                 Store.Log(error);
                 IsExiting = false;
+                if (manager != null) manager.UpdateShutdownState();
                 CdpMessageWatcher.ResumeAfterFailedShutdown();
                 RestoreMainWindow();
                 NoticeDialog.Show(mainWindow, "Chưa thể thoát", "Không hoàn tất được việc lưu dữ liệu. Có thể thử thoát lại.");

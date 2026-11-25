@@ -95,42 +95,84 @@ namespace ZaloManagerPoc
             {
                 Title = "Tin đã thu hồi · " + profile.Name, Owner = this, ShowInTaskbar = true,
                 WindowStartupLocation = WindowStartupLocation.CenterOwner,
-                Width = 650, Height = 500, MinWidth = 380, MinHeight = 330,
-                Background = ModernBrush("#F3F6FA"), Foreground = ModernBrush("#0F172A"),
+                Width = 1020, Height = 620, MinWidth = 720, MinHeight = 460,
+                Background = ModernBrush("#F1F5F9"), Foreground = ModernBrush("#0F172A"),
                 FontFamily = FontFamily, FontSize = 14
             };
-            var root = new DockPanel();
-            var header = new DockPanel { Margin = new Thickness(18, 13, 18, 14), LastChildFill = true };
-            var heading = new TextBlock { FontWeight = FontWeights.SemiBold, FontSize = 19, VerticalAlignment = VerticalAlignment.Center,
-                TextTrimming = TextTrimming.CharacterEllipsis };
-            var back = new Button { Content = "← Quay lại", Style = (Style)Resources["RowActionButton"], Margin = new Thickness(0, 0, 12, 0),
-                Visibility = Visibility.Collapsed };
-            var headerAvatar = new ContentControl { Margin = new Thickness(0, 0, 9, 0), Visibility = Visibility.Collapsed };
-            var deleteAll = new Button { Content = "Xóa tất cả", Style = (Style)Resources["DangerGhostButton"],
-                Margin = new Thickness(8, 0, 0, 0), VerticalAlignment = VerticalAlignment.Center };
-            DockPanel.SetDock(deleteAll, Dock.Right);
-            header.Children.Add(deleteAll);
 
-            // Storage badge (Ô đỏ bên phải)
-            var storageBadge = new Border
+            var splitGrid = new Grid();
+            splitGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(360) });
+            splitGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1) });
+            splitGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+
+            var leftPane = new DockPanel { Background = ModernBrush("#F8FAFC") };
+            Grid.SetColumn(leftPane, 0);
+            splitGrid.Children.Add(leftPane);
+
+            var splitterLine = new Border { Background = ModernBrush("#E2E8F0") };
+            Grid.SetColumn(splitterLine, 1);
+            splitGrid.Children.Add(splitterLine);
+
+            var rightPane = new DockPanel { Background = ModernBrush("#F1F5F9") };
+            Grid.SetColumn(rightPane, 2);
+            splitGrid.Children.Add(rightPane);
+
+            // --- Left Header ---
+            var leftHeaderBorder = new Border
             {
                 Background = ModernBrush("#F8FAFC"),
+                BorderBrush = ModernBrush("#E2E8F0"),
+                BorderThickness = new Thickness(0, 0, 0, 1),
+                Padding = new Thickness(16, 14, 16, 12)
+            };
+            var leftHeaderStack = new StackPanel();
+
+            var leftTopRow = new DockPanel { LastChildFill = true };
+            var deleteAll = new Button
+            {
+                Content = "Xóa tất cả",
+                Style = (Style)Resources["DangerGhostButton"],
+                Margin = new Thickness(8, 0, 0, 0),
+                Padding = new Thickness(10, 5, 10, 5),
+                FontSize = 12,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+            DockPanel.SetDock(deleteAll, Dock.Right);
+            leftTopRow.Children.Add(deleteAll);
+
+            var heading = new TextBlock
+            {
+                Text = "Tin đã thu hồi",
+                FontWeight = FontWeights.Bold,
+                FontSize = 17,
+                Foreground = ModernBrush("#1E293B"),
+                VerticalAlignment = VerticalAlignment.Center,
+                TextTrimming = TextTrimming.CharacterEllipsis
+            };
+            leftTopRow.Children.Add(heading);
+            leftHeaderStack.Children.Add(leftTopRow);
+
+            // Toggle switch + Note button + Storage badge row
+            var leftControlsRow = new DockPanel { Margin = new Thickness(0, 10, 0, 0), LastChildFill = false };
+
+            var storageBadge = new Border
+            {
+                Background = Brushes.White,
                 BorderBrush = ModernBrush("#CBD5E1"),
                 BorderThickness = new Thickness(1),
                 CornerRadius = new CornerRadius(8),
-                Padding = new Thickness(10, 5, 10, 5),
-                Margin = new Thickness(0, 0, 0, 0),
+                Padding = new Thickness(9, 4, 9, 4),
                 VerticalAlignment = VerticalAlignment.Center,
                 Cursor = System.Windows.Input.Cursors.Help
             };
             var storagePanel = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
-            var storageIcon = new TextBlock { Text = "💾 ", FontSize = 12, VerticalAlignment = VerticalAlignment.Center };
-            var storageLabel = new TextBlock { Text = "Lưu trữ: ", FontSize = 12, Foreground = ModernBrush("#64748B"), VerticalAlignment = VerticalAlignment.Center };
-            var storageValue = new TextBlock { Text = "0 B", FontSize = 12, FontWeight = FontWeights.SemiBold, Foreground = ModernBrush("#0F172A"), VerticalAlignment = VerticalAlignment.Center };
-            storagePanel.Children.Add(storageIcon);
+            storagePanel.Children.Add(new TextBlock { Text = "💾 ", FontSize = 11.5, VerticalAlignment = VerticalAlignment.Center });
+            var storageLabel = new TextBlock { Text = "Nội dung: ", FontSize = 11.5, Foreground = ModernBrush("#64748B"), VerticalAlignment = VerticalAlignment.Center };
+            var storageValue = new TextBlock { Text = "0 B", FontSize = 11.5, FontWeight = FontWeights.SemiBold, Foreground = ModernBrush("#0F172A"), VerticalAlignment = VerticalAlignment.Center };
             storagePanel.Children.Add(storageLabel);
             storagePanel.Children.Add(storageValue);
             storageBadge.Child = storagePanel;
+
             var storageMenu = new ContextMenu();
             var cleanMedia = new MenuItem { Header = "Xem tệp có thể dọn" };
             storageMenu.Items.Add(cleanMedia);
@@ -154,32 +196,22 @@ namespace ZaloManagerPoc
                 finally { cleanMedia.IsEnabled = true; }
             };
             DockPanel.SetDock(storageBadge, Dock.Right);
-            header.Children.Add(storageBadge);
+            leftControlsRow.Children.Add(storageBadge);
 
-            header.Children.Add(back);
-            header.Children.Add(headerAvatar);
-            var subtitle = new TextBlock { Foreground = ModernBrush("#64748B"), FontSize = 11,
-                Margin = new Thickness(0, 2, 0, 0), TextTrimming = TextTrimming.CharacterEllipsis, Visibility = Visibility.Collapsed };
-
-            var headingRow = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
-            headingRow.Children.Add(heading);
-
-            // Toggle switch + Note button (Ô đỏ bên trái)
             bool isRecallEnabled = CdpMessageWatcher.IsRecallEnabled(profile.Id);
-
             var toggleTrack = new Border
             {
-                Width = 40,
-                Height = 22,
-                CornerRadius = new CornerRadius(11),
+                Width = 38,
+                Height = 20,
+                CornerRadius = new CornerRadius(10),
                 Background = ModernBrush(isRecallEnabled ? "#10B981" : "#CBD5E1"),
                 Cursor = System.Windows.Input.Cursors.Hand,
                 VerticalAlignment = VerticalAlignment.Center
             };
             var toggleThumb = new System.Windows.Shapes.Ellipse
             {
-                Width = 16,
-                Height = 16,
+                Width = 14,
+                Height = 14,
                 Fill = Brushes.White,
                 VerticalAlignment = VerticalAlignment.Center,
                 HorizontalAlignment = isRecallEnabled ? HorizontalAlignment.Right : HorizontalAlignment.Left,
@@ -213,18 +245,146 @@ namespace ZaloManagerPoc
             var toggleContainer = new StackPanel
             {
                 Orientation = Orientation.Horizontal,
-                VerticalAlignment = VerticalAlignment.Center,
-                Margin = new Thickness(12, 0, 0, 0)
+                VerticalAlignment = VerticalAlignment.Center
             };
             toggleContainer.Children.Add(toggleTrack);
             toggleContainer.Children.Add(toggleLabel);
             toggleContainer.Children.Add(noteBtn);
-            headingRow.Children.Add(toggleContainer);
+            DockPanel.SetDock(toggleContainer, Dock.Left);
+            leftControlsRow.Children.Add(toggleContainer);
+            leftHeaderStack.Children.Add(leftControlsRow);
 
-            var titles = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
-            titles.Children.Add(headingRow);
-            titles.Children.Add(subtitle);
-            header.Children.Add(titles);
+            var subtitle = new TextBlock
+            {
+                Foreground = ModernBrush("#DC2626"),
+                FontSize = 11.5,
+                Margin = new Thickness(0, 6, 0, 0),
+                TextWrapping = TextWrapping.Wrap,
+                Visibility = Visibility.Collapsed
+            };
+            leftHeaderStack.Children.Add(subtitle);
+
+            leftHeaderBorder.Child = leftHeaderStack;
+            DockPanel.SetDock(leftHeaderBorder, Dock.Top);
+            leftPane.Children.Add(leftHeaderBorder);
+
+            var storageStatus = new TextBlock
+            {
+                Visibility = Visibility.Collapsed,
+                TextWrapping = TextWrapping.Wrap,
+                Foreground = ModernBrush("#B91C1C"),
+                FontSize = 12,
+                Margin = new Thickness(14, 6, 14, 10)
+            };
+            DockPanel.SetDock(storageStatus, Dock.Bottom);
+            leftPane.Children.Add(storageStatus);
+
+            var usersList = new StackPanel { Margin = new Thickness(12, 10, 12, 14) };
+            var usersScroll = new ScrollViewer
+            {
+                Content = usersList,
+                VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+                HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
+                Focusable = false
+            };
+            leftPane.Children.Add(usersScroll);
+
+            // --- Right Header ---
+            var rightHeaderBorder = new Border
+            {
+                Background = ModernBrush("#F8FAFC"),
+                BorderBrush = ModernBrush("#E2E8F0"),
+                BorderThickness = new Thickness(0, 0, 0, 1),
+                Padding = new Thickness(20, 12, 20, 12),
+                MinHeight = 60
+            };
+            var rightHeader = new DockPanel { LastChildFill = true };
+
+            var deleteConversation = new Button
+            {
+                Content = "Xóa hội thoại",
+                Style = (Style)Resources["DangerGhostButton"],
+                Margin = new Thickness(10, 0, 0, 0),
+                Padding = new Thickness(10, 5, 10, 5),
+                FontSize = 12,
+                VerticalAlignment = VerticalAlignment.Center,
+                Visibility = Visibility.Collapsed
+            };
+            DockPanel.SetDock(deleteConversation, Dock.Right);
+            rightHeader.Children.Add(deleteConversation);
+
+            var convStorageBadge = new Border
+            {
+                Background = Brushes.White,
+                BorderBrush = ModernBrush("#CBD5E1"),
+                BorderThickness = new Thickness(1),
+                CornerRadius = new CornerRadius(8),
+                Padding = new Thickness(9, 4, 9, 4),
+                Margin = new Thickness(10, 0, 0, 0),
+                VerticalAlignment = VerticalAlignment.Center,
+                Visibility = Visibility.Collapsed,
+                Cursor = System.Windows.Input.Cursors.Help
+            };
+            var convStorageText = new TextBlock
+            {
+                FontSize = 11.5,
+                Foreground = ModernBrush("#475569"),
+                VerticalAlignment = VerticalAlignment.Center
+            };
+            convStorageBadge.Child = convStorageText;
+            DockPanel.SetDock(convStorageBadge, Dock.Right);
+            rightHeader.Children.Add(convStorageBadge);
+
+            var headerAvatar = new ContentControl
+            {
+                Margin = new Thickness(0, 0, 10, 0),
+                VerticalAlignment = VerticalAlignment.Center,
+                Visibility = Visibility.Collapsed
+            };
+            DockPanel.SetDock(headerAvatar, Dock.Left);
+            rightHeader.Children.Add(headerAvatar);
+
+            var rightTitle = new TextBlock
+            {
+                Text = "Nội dung tin nhắn bị thu hồi",
+                FontWeight = FontWeights.SemiBold,
+                FontSize = 15,
+                Foreground = ModernBrush("#334155"),
+                VerticalAlignment = VerticalAlignment.Center,
+                TextTrimming = TextTrimming.CharacterEllipsis
+            };
+            rightHeader.Children.Add(rightTitle);
+
+            rightHeaderBorder.Child = rightHeader;
+            DockPanel.SetDock(rightHeaderBorder, Dock.Top);
+            rightPane.Children.Add(rightHeaderBorder);
+
+            const int pageSize = 60;
+            int page = 0;
+            var pageBar = new StackPanel
+            {
+                Orientation = Orientation.Horizontal,
+                Margin = new Thickness(20, 10, 20, 0),
+                Visibility = Visibility.Collapsed
+            };
+            var older = new Button { Content = "Cũ hơn", Style = (Style)Resources["RowActionButton"] };
+            var newer = new Button { Content = "Mới hơn", Style = (Style)Resources["RowActionButton"], Margin = new Thickness(8, 0, 0, 0) };
+            pageBar.Children.Add(older);
+            pageBar.Children.Add(newer);
+            DockPanel.SetDock(pageBar, Dock.Top);
+            rightPane.Children.Add(pageBar);
+
+            var items = new StackPanel { Margin = new Thickness(20, 16, 20, 20) };
+            var scroll = new ScrollViewer
+            {
+                Content = items,
+                VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+                HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
+                Focusable = false
+            };
+            rightPane.Children.Add(scroll);
+
+            dialog.Content = splitGrid;
 
             const string RecallNoteDetails =
                 "LƯU Ý KHI SỬ DỤNG TÍNH NĂNG TIN NHẮN THU HỒI:\n\n" +
@@ -248,12 +408,12 @@ namespace ZaloManagerPoc
                 toggleThumb.Margin = enabled ? new Thickness(0, 0, 3, 0) : new Thickness(3, 0, 0, 0);
                 toggleLabel.Text = enabled ? "Bật" : "Tắt";
                 toggleLabel.Foreground = ModernBrush(enabled ? "#10B981" : "#64748B");
-                if (!enabled && selected == null)
+                if (!enabled)
                 {
                     subtitle.Text = "Tính năng lưu tin thu hồi đang TẮT cho hồ sơ này";
                     subtitle.Visibility = Visibility.Visible;
                 }
-                else if (selected == null)
+                else
                 {
                     subtitle.Visibility = Visibility.Collapsed;
                 }
@@ -287,47 +447,60 @@ namespace ZaloManagerPoc
             {
                 NoticeDialog.Show(dialog, "Lưu ý về tính năng tin nhắn thu hồi", RecallNoteDetails);
             };
-            var headerFrame = new Border { Child = header };
-            DockPanel.SetDock(headerFrame, Dock.Top);
-            root.Children.Add(headerFrame);
-            var storageStatus = new TextBlock { Visibility = Visibility.Collapsed, TextWrapping = TextWrapping.Wrap,
-                Foreground = ModernBrush("#B91C1C"), Margin = new Thickness(18, 0, 18, 12) };
-            DockPanel.SetDock(storageStatus, Dock.Bottom);
-            root.Children.Add(storageStatus);
-
-            const int pageSize = 60;
-            int page = 0;
-            var pageBar = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(18, 0, 18, 6),
-                Visibility = Visibility.Collapsed };
-            var older = new Button { Content = "Cũ hơn", Style = (Style)Resources["RowActionButton"] };
-            var newer = new Button { Content = "Mới hơn", Style = (Style)Resources["RowActionButton"], Margin = new Thickness(8, 0, 0, 0) };
-            pageBar.Children.Add(older);
-            pageBar.Children.Add(newer);
-            DockPanel.SetDock(pageBar, Dock.Top);
-            root.Children.Add(pageBar);
-
-            var items = new StackPanel { Margin = new Thickness(18, 2, 18, 14) };
-            var scroll = new ScrollViewer { Content = items, VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
-                HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled, Focusable = false };
-            root.Children.Add(scroll);
-            dialog.Content = root;
 
             int renderedRevision = -1;
             var displayedMessages = new CdpMessageWatcher.RecalledMessage[0];
             var cardTemplate = RecallCardTemplate();
+            var selectedCardTemplate = RecallCardTemplate(selected: true);
+
             Action refresh = null;
             refresh = delegate
             {
                 int revision = CdpMessageWatcher.RecallRevision;
                 if (renderedRevision == revision) return;
 
+                updateToggleVisual();
+                var totalInfo = CdpMessageWatcher.GetRecallStorageInfo(profile.Id);
+                storageValue.Text = totalInfo.FormattedTotal;
+                storageBadge.ToolTip = "Tổng dung lượng lưu trữ tin thu hồi:\n" +
+                    "• Tin nhắn văn bản: " + totalInfo.FormattedText + " (" + totalInfo.TextCount + " tin)\n" +
+                    "• Tệp đa phương tiện: " + totalInfo.FormattedMedia + " (" + totalInfo.MediaCount + " tin có tệp)\n" +
+                    "• Dung lượng nội dung: " + totalInfo.FormattedTotal + "\nXem dung lượng trên đĩa ở màn hình chính.";
+
+                storageStatus.Text = CdpMessageWatcher.RecallStorageError;
+                storageStatus.Visibility = String.IsNullOrEmpty(storageStatus.Text) ? Visibility.Collapsed : Visibility.Visible;
+
+                var conversations = CdpMessageWatcher.GetRecallConversations(profile.Id);
+                deleteAll.IsEnabled = conversations.Length > 0;
+
+                if (conversations.Length == 0)
+                {
+                    selected = null;
+                }
+                else if (selected == null || !conversations.Any(c => c.Id == selected.Id))
+                {
+                    selected = conversations[0];
+                    page = 0;
+                    displayedMessages = new CdpMessageWatcher.RecalledMessage[0];
+                    items.Children.Clear();
+                }
+                else
+                {
+                    selected = conversations.First(c => c.Id == selected.Id);
+                }
+
+                // Render right pane first so ReadRecallConversation clears unread for the active sender
                 if (selected != null)
                 {
-                    toggleContainer.Visibility = Visibility.Collapsed;
+                    rightTitle.Text = selected.Name;
+                    headerAvatar.Content = RecallAvatar(selected, 32);
+                    headerAvatar.Visibility = Visibility.Visible;
+                    deleteConversation.Visibility = Visibility.Visible;
+                    convStorageBadge.Visibility = Visibility.Visible;
+
                     var convInfo = CdpMessageWatcher.GetRecallConversationStorageInfo(profile.Id, selected.Id);
-                    storageLabel.Text = "Hội thoại: ";
-                    storageValue.Text = convInfo.FormattedTotal;
-                    storageBadge.ToolTip = "Dung lượng cuộc trò chuyện này:\n" +
+                    convStorageText.Text = "Hội thoại: " + convInfo.FormattedTotal;
+                    convStorageBadge.ToolTip = "Dung lượng cuộc trò chuyện này:\n" +
                         "• Tin nhắn văn bản: " + convInfo.FormattedText + " (" + convInfo.TextCount + " tin)\n" +
                         "• Tệp đa phương tiện: " + convInfo.FormattedMedia + " (" + convInfo.MediaCount + " tin có tệp)\n" +
                         "• Tổng dung lượng: " + convInfo.FormattedTotal;
@@ -339,17 +512,14 @@ namespace ZaloManagerPoc
                     pageBar.Visibility = allMessages.Length > pageSize ? Visibility.Visible : Visibility.Collapsed;
                     older.IsEnabled = end > pageSize;
                     newer.IsEnabled = page > 0;
-                    renderedRevision = CdpMessageWatcher.RecallRevision;
-                    deleteAll.IsEnabled = messages.Length > 0;
+                    deleteConversation.IsEnabled = allMessages.Length > 0;
 
                     bool sameMessages = messages.Length == displayedMessages.Length;
                     if (sameMessages)
                     {
                         for (int i = 0; i < messages.Length; i++)
                         {
-                            var m1 = messages[i];
-                            var m2 = displayedMessages[i];
-                            if (!SameRecallBubble(m1, m2))
+                            if (!SameRecallBubble(messages[i], displayedMessages[i]))
                             {
                                 sameMessages = false;
                                 break;
@@ -357,107 +527,111 @@ namespace ZaloManagerPoc
                         }
                     }
 
-                    if (sameMessages && items.Children.Count > 0)
+                    if (!sameMessages || items.Children.Count == 0)
                     {
-                        storageStatus.Text = CdpMessageWatcher.RecallStorageError;
-                        storageStatus.Visibility = String.IsNullOrEmpty(storageStatus.Text) ? Visibility.Collapsed : Visibility.Visible;
-                        return;
-                    }
-
-                    double offset = scroll.VerticalOffset;
-                    bool scrollToEnd = messages.Length > displayedMessages.Length;
-                    int start = 0;
-                    if (items.Children.Count > 0 && displayedMessages.Length > 0 && scrollToEnd)
-                    {
-                        bool prefixMatches = true;
-                        for (int i = 0; i < displayedMessages.Length; i++)
+                        double offset = scroll.VerticalOffset;
+                        bool scrollToEnd = messages.Length > displayedMessages.Length;
+                        int start = 0;
+                        if (items.Children.Count > 0 && displayedMessages.Length > 0 && scrollToEnd)
                         {
-                            var m1 = messages[i];
-                            var m2 = displayedMessages[i];
-                            if (!SameRecallBubble(m1, m2))
+                            bool prefixMatches = true;
+                            for (int i = 0; i < displayedMessages.Length; i++)
                             {
-                                prefixMatches = false;
-                                break;
+                                if (!SameRecallBubble(messages[i], displayedMessages[i]))
+                                {
+                                    prefixMatches = false;
+                                    break;
+                                }
+                            }
+                            if (prefixMatches) start = displayedMessages.Length;
+                            else items.Children.Clear();
+                        }
+                        else items.Children.Clear();
+
+                        DateTime? day = start > 0 ? (DateTime?)messages[start - 1].DetectedAt.LocalDateTime.Date : null;
+                        for (int index = start; index < messages.Length; index++)
+                        {
+                            var message = messages[index];
+                            DateTime messageDay = message.DetectedAt.LocalDateTime.Date;
+                            if (day != messageDay)
+                            {
+                                items.Children.Add(RecallDayDivider(messageDay));
+                                day = messageDay;
+                            }
+                            var bubble = RecallBubble(message, dialog);
+                            if (!message.Outgoing)
+                            {
+                                var msgRow = new DockPanel { LastChildFill = true };
+                                var miniAvatar = RecallAvatar(selected, 28);
+                                miniAvatar.VerticalAlignment = VerticalAlignment.Top;
+                                miniAvatar.Margin = new Thickness(0, 4, 10, 0);
+                                DockPanel.SetDock(miniAvatar, Dock.Left);
+                                msgRow.Children.Add(miniAvatar);
+                                msgRow.Children.Add(bubble);
+                                items.Children.Add(msgRow);
+                            }
+                            else
+                            {
+                                items.Children.Add(bubble);
                             }
                         }
-                        if (prefixMatches) start = displayedMessages.Length;
-                        else items.Children.Clear();
+                        if (messages.Length == 0) items.Children.Add(RecallEmpty("Cuộc trò chuyện này không còn tin thu hồi."));
+                        if (scrollToEnd) scroll.ScrollToEnd();
+                        else scroll.ScrollToVerticalOffset(offset);
+                        displayedMessages = messages;
                     }
-                    else items.Children.Clear();
 
-                    DateTime? day = start > 0 ? (DateTime?)messages[start - 1].DetectedAt.LocalDateTime.Date : null;
-                    for (int index = start; index < messages.Length; index++)
-                    {
-                        var message = messages[index];
-                        DateTime messageDay = message.DetectedAt.LocalDateTime.Date;
-                        if (day != messageDay)
-                        {
-                            items.Children.Add(RecallDayDivider(messageDay));
-                            day = messageDay;
-                        }
-                        items.Children.Add(RecallBubble(message, dialog));
-                    }
-                    if (messages.Length == 0) items.Children.Add(RecallEmpty("Cuộc trò chuyện này không còn tin thu hồi."));
-                    if (scrollToEnd) scroll.ScrollToEnd();
-                    else scroll.ScrollToVerticalOffset(offset);
-                    displayedMessages = messages;
-
-                    storageStatus.Text = CdpMessageWatcher.RecallStorageError;
-                    storageStatus.Visibility = String.IsNullOrEmpty(storageStatus.Text) ? Visibility.Collapsed : Visibility.Visible;
-                    return;
+                    // Active sender was just read
+                    selected.Unread = 0;
                 }
-                renderedRevision = revision;
+                else
+                {
+                    rightTitle.Text = "Nội dung tin nhắn bị thu hồi";
+                    headerAvatar.Visibility = Visibility.Collapsed;
+                    headerAvatar.Content = null;
+                    deleteConversation.Visibility = Visibility.Collapsed;
+                    convStorageBadge.Visibility = Visibility.Collapsed;
+                    pageBar.Visibility = Visibility.Collapsed;
+                    items.Children.Clear();
+                    displayedMessages = new CdpMessageWatcher.RecalledMessage[0];
+                    items.Children.Add(RecallEmpty(conversations.Length == 0
+                        ? "Chưa có tin nhắn thu hồi."
+                        : "Chọn một người gửi bên trái để xem tin nhắn thu hồi."));
+                }
 
-                heading.Text = "Tin đã thu hồi";
-                pageBar.Visibility = Visibility.Collapsed;
-                toggleContainer.Visibility = Visibility.Visible;
-                updateToggleVisual();
-                var totalInfo = CdpMessageWatcher.GetRecallStorageInfo(profile.Id);
-                storageLabel.Text = "Nội dung: ";
-                storageValue.Text = totalInfo.FormattedTotal;
-                storageBadge.ToolTip = "Tổng dung lượng lưu trữ tin thu hồi:\n" +
-                    "• Tin nhắn văn bản: " + totalInfo.FormattedText + " (" + totalInfo.TextCount + " tin)\n" +
-                    "• Tệp đa phương tiện: " + totalInfo.FormattedMedia + " (" + totalInfo.MediaCount + " tin có tệp)\n" +
-                    "• Dung lượng nội dung: " + totalInfo.FormattedTotal + "\nXem dung lượng trên đĩa ở màn hình chính.";
-
-                items.Children.Clear();
-                var conversations = CdpMessageWatcher.GetRecallConversations(profile.Id);
-                deleteAll.IsEnabled = conversations.Length > 0;
-                storageStatus.Text = CdpMessageWatcher.RecallStorageError;
-                storageStatus.Visibility = String.IsNullOrEmpty(storageStatus.Text) ? Visibility.Collapsed : Visibility.Visible;
+                // Render left user list
+                usersList.Children.Clear();
                 foreach (var conversation in conversations)
                 {
+                    bool isActive = selected != null && conversation.Id == selected.Id;
                     var card = new Button
                     {
-                        Content = RecallConversationCard(conversation), Template = cardTemplate,
-                        Margin = new Thickness(0, 0, 0, 8), Padding = new Thickness(11),
+                        Content = RecallConversationCard(conversation),
+                        Template = isActive ? selectedCardTemplate : cardTemplate,
+                        Margin = new Thickness(0, 0, 0, 8),
+                        Padding = new Thickness(12, 10, 12, 10),
                         HorizontalAlignment = HorizontalAlignment.Stretch
                     };
                     System.Windows.Automation.AutomationProperties.SetName(card, conversation.Name + ", " + conversation.Unread + " tin chưa đọc");
+                    var captured = conversation;
                     card.Click += delegate
                     {
-                        selected = conversation;
+                        if (selected != null && selected.Id == captured.Id) return;
+                        selected = captured;
                         page = 0;
                         displayedMessages = new CdpMessageWatcher.RecalledMessage[0];
                         items.Children.Clear();
-                        heading.Text = selected.Name;
-                        subtitle.Text = "Tin thu hồi · " + profile.Name;
-                        subtitle.Visibility = Visibility.Visible;
-                        headerFrame.Background = Brushes.White;
-                        headerFrame.BorderBrush = ModernBrush("#DCE5F0");
-                        headerFrame.BorderThickness = new Thickness(0, 0, 0, 1);
-                        items.Margin = new Thickness(18, 12, 18, 14);
-                        headerAvatar.Content = RecallAvatar(selected);
-                        headerAvatar.Visibility = Visibility.Visible;
-                        back.Visibility = Visibility.Visible;
                         renderedRevision = -1;
                         refresh();
                     };
-                    items.Children.Add(card);
+                    usersList.Children.Add(card);
                 }
                 if (conversations.Length == 0)
-                    items.Children.Add(RecallEmpty("Chưa có tin thu hồi."));
+                    usersList.Children.Add(RecallEmpty("Chưa có tin thu hồi."));
+
+                renderedRevision = CdpMessageWatcher.RecallRevision;
             };
+
             Action changePage = delegate
             {
                 items.Children.Clear();
@@ -470,22 +644,28 @@ namespace ZaloManagerPoc
             newer.Click += delegate { page--; changePage(); };
 
             bool deleting = false;
-            deleteAll.Click += async delegate
+            Func<string, string, Task> performDelete = async (conversationId, conversationName) =>
             {
                 if (deleting) return;
-                var conversation = selected;
-                if (!ConfirmDialog.AskRecallDeletion(dialog, profile.Name, conversation == null ? null : conversation.Name)) return;
+                if (!ConfirmDialog.AskRecallDeletion(dialog, profile.Name, conversationName)) return;
                 deleting = true;
                 try
                 {
-                    var result = await Task.Run(() => CdpMessageWatcher.DeleteRecalls(profile.Id, conversation == null ? null : conversation.Id));
+                    var result = await Task.Run(() => CdpMessageWatcher.DeleteRecalls(profile.Id, conversationId));
                     if (result.Saved) RefreshRecallStorageAfterDeletion();
                     if (!dialog.IsLoaded) return;
+                    if (conversationId == null || (selected != null && selected.Id == conversationId))
+                    {
+                        selected = null;
+                        displayedMessages = new CdpMessageWatcher.RecalledMessage[0];
+                        items.Children.Clear();
+                    }
+                    renderedRevision = -1;
                     refresh();
                     if (!result.Saved) NoticeDialog.Show(dialog, "Không xóa được tin", CdpMessageWatcher.RecallStorageError);
                     else NoticeDialog.Success(dialog, "Đã xóa tin thu hồi",
                         "Đã giải phóng " + StorageMeasurement.Format(result.ReleasedBytes) + " tệp đính kèm.",
-                        conversation == null ? profile.Name : conversation.Name);
+                        conversationName ?? profile.Name);
                 }
                 catch (Exception error)
                 {
@@ -494,21 +674,11 @@ namespace ZaloManagerPoc
                 }
                 finally { deleting = false; }
             };
-            back.Click += delegate
+
+            deleteAll.Click += async delegate { await performDelete(null, null); };
+            deleteConversation.Click += async delegate
             {
-                selected = null;
-                toggleContainer.Visibility = Visibility.Visible;
-                updateToggleVisual();
-                back.Visibility = Visibility.Collapsed;
-                headerAvatar.Visibility = Visibility.Collapsed;
-                headerAvatar.Content = null;
-                subtitle.Visibility = Visibility.Collapsed;
-                headerFrame.Background = null;
-                headerFrame.BorderThickness = new Thickness(0);
-                items.Margin = new Thickness(18, 2, 18, 14);
-                renderedRevision = -1;
-                refresh();
-                scroll.ScrollToTop();
+                if (selected != null) await performDelete(selected.Id, selected.Name);
             };
 
             var timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(500) };
@@ -531,40 +701,43 @@ namespace ZaloManagerPoc
                 a.FromSource == b.FromSource && a.CaptureStatus == b.CaptureStatus;
         }
 
-        private static ControlTemplate RecallCardTemplate()
+        private static ControlTemplate RecallCardTemplate(bool selected = false)
         {
             var border = new FrameworkElementFactory(typeof(Border), "card");
-            border.SetValue(Border.BackgroundProperty, Brushes.White);
-            border.SetValue(Border.BorderBrushProperty, ModernBrush("#DCE5F0"));
-            border.SetValue(Border.BorderThicknessProperty, new Thickness(1));
-            border.SetValue(Border.CornerRadiusProperty, new CornerRadius(9));
+            border.SetValue(Border.BackgroundProperty, selected ? ModernBrush("#EFF6FF") : Brushes.White);
+            border.SetValue(Border.BorderBrushProperty, ModernBrush(selected ? "#93C5FD" : "#E2E8F0"));
+            border.SetValue(Border.BorderThicknessProperty, new Thickness(selected ? 1.5 : 1));
+            border.SetValue(Border.CornerRadiusProperty, new CornerRadius(10));
             border.SetValue(Border.PaddingProperty, new TemplateBindingExtension(Control.PaddingProperty));
             var presenter = new FrameworkElementFactory(typeof(ContentPresenter));
             presenter.SetValue(ContentPresenter.HorizontalAlignmentProperty, HorizontalAlignment.Stretch);
             border.AppendChild(presenter);
             var template = new ControlTemplate(typeof(Button)) { VisualTree = border };
-            foreach (var property in new[] { UIElement.IsMouseOverProperty, UIElement.IsKeyboardFocusedProperty })
+            if (!selected)
             {
-                var highlight = new Trigger { Property = property, Value = true };
-                highlight.Setters.Add(new Setter(Border.BackgroundProperty, ModernBrush("#EAF2FF"), "card"));
-                highlight.Setters.Add(new Setter(Border.BorderBrushProperty, ModernBrush("#93B8EB"), "card"));
-                template.Triggers.Add(highlight);
+                foreach (var property in new[] { UIElement.IsMouseOverProperty, UIElement.IsKeyboardFocusedProperty })
+                {
+                    var highlight = new Trigger { Property = property, Value = true };
+                    highlight.Setters.Add(new Setter(Border.BackgroundProperty, ModernBrush("#F8FAFC"), "card"));
+                    highlight.Setters.Add(new Setter(Border.BorderBrushProperty, ModernBrush("#93C5FD"), "card"));
+                    template.Triggers.Add(highlight);
+                }
             }
             return template;
         }
         private static UIElement RecallConversationCard(CdpMessageWatcher.RecallConversation conversation)
         {
-            var row = new Grid { MinWidth = 235 };
+            var row = new Grid();
             row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
             row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
             row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-            var avatar = RecallAvatar(conversation);
+            var avatar = RecallAvatar(conversation, 38);
             avatar.Margin = new Thickness(0, 0, 11, 0);
             row.Children.Add(avatar);
             var title = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
-            title.Children.Add(new TextBlock { Text = conversation.Name, FontSize = 14, FontWeight = FontWeights.SemiBold,
-                TextTrimming = TextTrimming.CharacterEllipsis, HorizontalAlignment = HorizontalAlignment.Left, MaxWidth = 380 });
-            title.Children.Add(new TextBlock { Text = conversation.Latest.ToString("HH:mm · dd/MM"), FontSize = 11, Foreground = ModernBrush("#64748B") });
+            title.Children.Add(new TextBlock { Text = conversation.Name, FontSize = 13.5, FontWeight = FontWeights.SemiBold,
+                Foreground = ModernBrush("#1E293B"), TextTrimming = TextTrimming.CharacterEllipsis, HorizontalAlignment = HorizontalAlignment.Left });
+            title.Children.Add(new TextBlock { Text = conversation.Latest.ToString("HH:mm · dd/MM"), FontSize = 11.5, Foreground = ModernBrush("#64748B"), Margin = new Thickness(0, 2, 0, 0) });
             Grid.SetColumn(title, 1);
             row.Children.Add(title);
             if (conversation.Unread > 0)
@@ -572,6 +745,7 @@ namespace ZaloManagerPoc
                 var count = Badge(new TextBlock { Text = conversation.Unread.ToString(), HorizontalAlignment = HorizontalAlignment.Center },
                     "#B91C1C", "#FFFFFF");
                 count.VerticalAlignment = VerticalAlignment.Center;
+                count.Margin = new Thickness(8, 0, 0, 0);
                 Grid.SetColumn(count, 2);
                 row.Children.Add(count);
             }
